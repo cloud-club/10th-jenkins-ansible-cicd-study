@@ -158,7 +158,86 @@ credentials:
 - 모든 값은 `"${SOME_SECRET}"` 비밀 소스 해결 도구를 통해 해결된다.
 - `base64`, `readFileBase64`는 JCasC 버전 v1.42부터 변수 확장을 지원한다.
 
-### 2-3) 참고 문헌
+### 2-3) JCasC 실습
+
+**1단계) JCasC 플러그인 설치**
+
+```jsx
+Manage Jenkins
+→ Plugins
+→ Available plugins
+→ Configuration as Code
+
+# 설치 후 재시작
+sudo systemctl restart jenkins
+```
+
+**2단계) YAML 파일 만들기**
+
+```jsx
+soso@DESKTOP-JM4DKDH:~/jenkins-study$ sudo mkdir -p /var/lib/jenkins/casc
+soso@DESKTOP-JM4DKDH:~/jenkins-study$ sudo nano /var/lib/jenkins/casc/jenkins.yaml
+
+jenkins:
+  systemMessage: "Jenkins configuration managed by JCasC"
+```
+
+- `/var/lib/jenkins` → Jenkins의 `JENKINS_HOME`
+- `/var/lib/jenkins/casc` → JCasC 설정 파일을 별도로 관리하기 위한 디렉터리
+
+**3단계) Jenkins에게 JCasC 파일 위치 알려주기**
+
+```jsx
+soso@DESKTOP-JM4DKDH:~/jenkins-study$ sudo systemctl edit jenkins
+
+[Service]
+Environment="JENKINS_PORT=8888"
+Environment="CASC_JENKINS_CONFIG=/var/lib/jenkins/casc/jenkins.yaml"
+
+Successfully installed edited file '/etc/systemd/system/jenkins.service.d/override.conf'.
+soso@DESKTOP-JM4DKDH:~/jenkins-study$ sudo systemctl daemon-reload
+soso@DESKTOP-JM4DKDH:~/jenkins-study$ sudo systemctl restart jenkins
+```
+
+- `CASC_JENKINS_CONFIG` 환경 변수로 Jenkins가 어떤 YAML 파일을 JCasC 설정으로 사용할지 지정한다.
+  ```jsx
+  CASC_JENKINS_CONFIG
+          ↓
+  /var/lib/jenkins/casc/jenkins.yaml
+          ↓
+  Jenkins가 YAML 설정 읽음
+          ↓
+  Jenkins 설정에 반영
+  ```
+
+**4단계) Jenkins UI에서 확인하기**
+
+![시스템 메시지 설명](./jcasc-systemmessage1.png)
+
+**5단계) YAML 수정하기**
+
+```jsx
+soso@DESKTOP-JM4DKDH:~/jenkins-study$ sudo nano /var/lib/jenkins/casc/jenkins.yaml
+
+jenkins:
+  systemMessage: "Hello from JCasC!"
+
+soso@DESKTOP-JM4DKDH:~/jenkins-study$ sudo systemctl restart jenkins
+```
+
+![시스템 메시지 설명](./jcasc-systemmessage2.png)
+
+- `jenkins:` → Jenkins 자체에 대한 설정
+- `systemMessage:` → Jenkins UI에 표시할 System Message
+- `"Hello from JCasC!"` → 실제 설정값
+  → 즉, Jenkins UI에서 직접 System Message를 변경하는 대신 YAML에 원하는 값을 선언한 것이다.
+
+**실습 정리**
+
+- UI : Jenkins UI → 설정 변경 → Jenkins 내부 설정
+- JCasC : jenkins.yaml → JCasC → Jenkins 설정
+
+### 2-4) 참고 문헌
 
 - https://www.jenkins.io/doc/book/managing/casc/
 - https://github.com/jenkinsci/configuration-as-code-plugin
