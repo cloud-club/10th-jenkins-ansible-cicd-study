@@ -1,0 +1,25 @@
+jenkins:
+  systemMessage: "긴급 점검"     # ← Drift 해소: UI에서 바꾼 값을 코드로 승격
+  numExecutors: 0                    # ← Built-in Node executor 0
+  nodes:
+  - permanent:                        # ← jenkins-agent1 등록 내용
+      name: "jenkins-agent1"
+      labelString: "linux"
+      remoteFS: "/home/jenkins/agent"
+      launcher:
+        ssh:
+          credentialsId: "jenkins-agent1-ssh-key"
+          host: "jenkins-agent1"
+          port: 22
+          sshHostKeyVerificationStrategy: "nonVerifyingKeyVerificationStrategy"
+
+credentials:
+  system:
+    domainCredentials:
+    - credentials:
+      - basicSSHUserPrivateKey:        # ← SSH Credential
+          id: "jenkins-agent1-ssh-key"
+          privateKeySource:
+            directEntry:
+              privateKey: ${SSH_PRIVATE_KEY}
+          username: "jenkins"
