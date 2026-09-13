@@ -7,6 +7,12 @@ pipeline {
     }
 
     stages {
+        stage('Multibranch Check') {
+            steps {
+                echo "BRANCH_NAME = ${env.BRANCH_NAME}"
+            }
+        }
+
         stage('Verify Agent') {
             steps {
                 sh 'hostname'
