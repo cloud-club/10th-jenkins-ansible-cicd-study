@@ -1,0 +1,30 @@
+pipeline {
+    agent { label 'linux' }
+
+    options {
+        timestamps()
+        timeout(time: 5, unit: 'MINUTES')
+    }
+
+    stages {
+        stage('Verify Agent') {
+            steps {
+                sh 'hostname'
+                sh 'whoami'
+                sh 'pwd'
+            }
+        }
+
+        stage('Verify Docker') {
+            steps {
+                sh 'docker version'
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Build result: ${currentBuild.currentResult}"
+        }
+    }
+}
