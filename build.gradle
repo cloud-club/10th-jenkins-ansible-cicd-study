@@ -1,0 +1,31 @@
+plugins {
+    id 'groovy'
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+    maven { url 'https://repo.jenkins-ci.org/public/' }
+}
+
+dependencies {
+    implementation 'org.apache.groovy:groovy:4.0.21'
+    testImplementation 'com.github.jenkinsci:JenkinsPipelineUnit:v1.19'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+sourceSets {
+    test {
+        groovy {
+            srcDirs = ['test/groovy']
+        }
+    }
+}
+
+test {
+    useJUnit()
+    testLogging {
+        showStandardStreams = true
+        exceptionFormat = 'full'
+    }
+}
