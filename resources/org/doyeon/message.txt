@@ -1,0 +1,1 @@
+Hello from resources file, {NAME}! 이건 Groovy 코드가 아니라 정적 텍스트 파일입니다.
