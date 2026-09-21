@@ -1,0 +1,22 @@
+---
+- name: Manage and verify Nginx
+  hosts: web
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Ensure Nginx is installed
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: Ensure Nginx is running and enabled
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Verify Nginx HTTP response
+      ansible.builtin.uri:
+        url: http://localhost
+        status_code: 200

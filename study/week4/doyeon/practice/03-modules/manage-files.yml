@@ -1,0 +1,34 @@
+---
+- name: Practice file management and idempotency
+  hosts: web
+  gather_facts: false
+
+  vars:
+    lab_directory: /home/doyeon/ansible-lab
+
+  tasks:
+    - name: Ensure practice directory exists
+      ansible.builtin.file:
+        path: "{{ lab_directory }}"
+        state: directory
+        owner: doyeon
+        group: doyeon
+        mode: "0755"
+
+    - name: Copy practice file
+      ansible.builtin.copy:
+        src: files/message.txt
+        dest: "{{ lab_directory }}/message.txt"
+        owner: doyeon
+        group: doyeon
+        mode: "0644"
+
+    - name: Read copied file
+      ansible.builtin.command:
+        cmd: "cat {{ lab_directory }}/message.txt"
+      register: file_content
+      changed_when: false
+
+    - name: Show copied file content
+      ansible.builtin.debug:
+        var: file_content.stdout

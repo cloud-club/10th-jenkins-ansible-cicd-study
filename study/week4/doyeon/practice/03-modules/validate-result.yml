@@ -1,0 +1,21 @@
+---
+- name: Practice failed_when
+  hosts: web
+  gather_facts: false
+
+  vars:
+    expected_text: Ansible
+
+  tasks:
+    - name: Read managed file
+      ansible.builtin.command:
+        cmd: cat /home/doyeon/ansible-lab/message.txt
+      register: file_check
+      changed_when: false
+      failed_when: >
+        file_check.rc != 0 or
+        expected_text not in file_check.stdout
+
+    - name: Show validation result
+      ansible.builtin.debug:
+        msg: "Found '{{ expected_text }}' in the managed file"
