@@ -1,0 +1,9 @@
+---
+all:
+  children:
+    production:
+      children:
+        web:
+          hosts:
+            vm01:
+              ansible_host: 1.201.116.156

@@ -1,0 +1,58 @@
+---
+- name: Practice block rescue and always
+  hosts: web
+  gather_facts: false
+
+  vars:
+    simulate_failure: false
+    deployment_status_file: /home/doyeon/ansible-playbook-lab/deployment-status.txt
+
+  tasks:
+    - name: Run deployment flow
+      block:
+        - name: Record deployment start
+          ansible.builtin.copy:
+            content: "deployment started\n"
+            dest: "{{ deployment_status_file }}"
+            owner: doyeon
+            group: doyeon
+            mode: "0644"
+
+        - name: Validate simulated deployment
+          ansible.builtin.assert:
+            that:
+              - not (simulate_failure | bool)
+            fail_msg: Simulated deployment failure
+            success_msg: Deployment validation succeeded
+
+        - name: Record deployment success
+          ansible.builtin.copy:
+            content: "deployment succeeded\n"
+            dest: "{{ deployment_status_file }}"
+            owner: doyeon
+            group: doyeon
+            mode: "0644"
+
+      rescue:
+        - name: Record rollback result
+          ansible.builtin.copy:
+            content: "rollback completed\n"
+            dest: "{{ deployment_status_file }}"
+            owner: doyeon
+            group: doyeon
+            mode: "0644"
+
+        - name: Show rollback message
+          ansible.builtin.debug:
+            msg: Deployment failed, so rollback was executed
+
+      always:
+        - name: Read final deployment status
+          ansible.builtin.command:
+            cmd: "cat {{ deployment_status_file }}"
+          register: final_deployment_status
+          changed_when: false
+
+        - name: Show final deployment status
+          ansible.builtin.debug:
+            var: final_deployment_status.stdout

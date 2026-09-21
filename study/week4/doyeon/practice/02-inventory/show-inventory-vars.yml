@@ -1,0 +1,30 @@
+---
+- name: Show inventory variables
+  hosts: web
+  gather_facts: false
+
+  tasks:
+    - name: Show current inventory host
+      ansible.builtin.debug:
+        msg: "inventory_hostname={{ inventory_hostname }}"
+
+    - name: Show groups of current host
+      ansible.builtin.debug:
+        msg: "group_names={{ group_names }}"
+
+    - name: Show hosts in web group
+      ansible.builtin.debug:
+        msg: "web hosts={{ groups['web'] }}"
+
+    - name: Show current host address through hostvars
+      ansible.builtin.debug:
+        msg: "address={{ hostvars[inventory_hostname]['ansible_host'] }}"
+
+    - name: Show inherited variables
+      ansible.builtin.debug:
+        msg:
+          - "environment={{ app_environment }}"
+          - "role={{ server_role }}"
+          - "port={{ app_port }}"
+          - "timezone={{ timezone }}"
+

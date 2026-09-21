@@ -1,0 +1,48 @@
+---
+- name: Practice variables and execution flow
+  hosts: web
+  gather_facts: false
+
+  vars:
+    lab_root: /home/doyeon/ansible-playbook-lab
+    lab_directories:
+      - releases
+      - logs
+      - backup
+    managed_file: /home/doyeon/ansible-lab/message.txt
+
+  tasks:
+    - name: Show practice information
+      ansible.builtin.debug:
+        msg: "Create directories under {{ lab_root }} on {{ inventory_hostname }}"
+
+    - name: Create practice directories
+      ansible.builtin.file:
+        path: "{{ lab_root }}/{{ item }}"
+        state: directory
+        owner: doyeon
+        group: doyeon
+        mode: "0755"
+      loop: "{{ lab_directories }}"
+
+    - name: Check whether previously managed file exists
+      ansible.builtin.stat:
+        path: "{{ managed_file }}"
+      register: managed_file_status
+
+    - name: Read managed file when it exists
+      ansible.builtin.command:
+        cmd: "cat {{ managed_file }}"
+      register: managed_file_content
+      changed_when: false
+      when: managed_file_status.stat.exists
+
+    - name: Show managed file content
+      ansible.builtin.debug:
+        var: managed_file_content.stdout
+      when: managed_file_status.stat.exists
+
+    - name: Report missing managed file
+      ansible.builtin.debug:
+        msg: "{{ managed_file }} does not exist"
+      when: not managed_file_status.stat.exists

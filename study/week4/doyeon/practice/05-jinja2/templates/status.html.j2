@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ app_name | default('Ansible Lab') }}</title>
+</head>
+<body>
+  <h1>{{ app_name | upper }}</h1>
+
+  <p>Environment: {{ app_environment | default('development') }}</p>
+  <p>Inventory host: {{ inventory_hostname }}</p>
+  <p>Application port variable: {{ app_port }}</p>
+  <p>Server role: {{ server_role | default('unknown') }}</p>
+
+{% if maintenance_mode | bool %}
+  <p>현재 점검 중입니다.</p>
+{% else %}
+  <p>서비스가 정상 운영 중입니다.</p>
+{% endif %}
+
+  <h2>Enabled features</h2>
+  <ul>
+{% for feature in enabled_features %}
+    <li>{{ feature }}</li>
+{% endfor %}
+  </ul>
+</body>
+</html>
