@@ -1,0 +1,38 @@
+---
+- name: Practice notify and handlers
+  hosts: web
+  become: true
+  gather_facts: false
+
+  vars:
+    nginx_lab_config: /etc/nginx/conf.d/ansible-lab.conf
+
+  tasks:
+    - name: Manage Nginx practice configuration
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible
+          server_tokens off;
+        dest: "{{ nginx_lab_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload Nginx
+
+    - name: Validate Nginx configuration
+      ansible.builtin.command:
+        cmd: nginx -t
+      register: nginx_config_test
+      changed_when: false
+      failed_when: nginx_config_test.rc != 0
+
+    - name: Verify Nginx HTTP response
+      ansible.builtin.uri:
+        url: http://localhost
+        status_code: 200
+
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded

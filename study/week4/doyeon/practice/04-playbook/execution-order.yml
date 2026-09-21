@@ -1,0 +1,43 @@
+---
+- name: Practice play execution order
+  hosts: web
+  become: true
+  gather_facts: false
+
+  vars:
+    nginx_lab_config: /etc/nginx/conf.d/ansible-lab.conf
+
+  pre_tasks:
+    - name: Check available disk space before configuration
+      ansible.builtin.command:
+        cmd: df -P /
+      register: disk_space
+      changed_when: false
+
+    - name: Show disk space
+      ansible.builtin.debug:
+        var: disk_space.stdout_lines
+
+  tasks:
+    - name: Update Nginx practice configuration
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible - execution order practice
+          server_tokens off;
+        dest: "{{ nginx_lab_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload Nginx
+
+  post_tasks:
+    - name: Verify Nginx after handler execution
+      ansible.builtin.uri:
+        url: http://localhost
+        status_code: 200
+
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded

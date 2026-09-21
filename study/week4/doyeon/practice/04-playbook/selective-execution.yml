@@ -1,0 +1,30 @@
+---
+- name: Practice tags and host limit
+  hosts: web
+  gather_facts: false
+
+  tasks:
+    - name: Show deployment target
+      ansible.builtin.debug:
+        msg: "target={{ inventory_hostname }}"
+      tags:
+        - always
+
+    - name: Run configuration task
+      ansible.builtin.debug:
+        msg: Configuration task executed
+      tags:
+        - config
+
+    - name: Run deployment task
+      ansible.builtin.debug:
+        msg: Deployment task executed
+      tags:
+        - deploy
+
+    - name: Run verification task
+      ansible.builtin.debug:
+        msg: Verification task executed
+      tags:
+        - verify
+

@@ -1,0 +1,36 @@
+---
+- name: Verify connection and privilege escalation
+  hosts: web
+  gather_facts: false
+
+  tasks:
+    - name: Check SSH login user
+      ansible.builtin.command:
+        cmd: whoami
+      register: ssh_user
+      changed_when: false
+
+    - name: Show SSH login user
+      ansible.builtin.debug:
+        msg: "SSH user={{ ssh_user.stdout }}"
+
+    - name: Check effective user with become
+      ansible.builtin.command:
+        cmd: whoami
+      become: true
+      register: elevated_user_result
+      changed_when: false
+
+    - name: Show become user
+      ansible.builtin.debug:
+        msg: "become user={{ elevated_user_result.stdout }}"
+
+    - name: Read Python version
+      ansible.builtin.command:
+        cmd: python3 --version
+      register: python_version
+      changed_when: false
+
+    - name: Show Python version
+      ansible.builtin.debug:
+        msg: "{{ python_version.stdout }}"
