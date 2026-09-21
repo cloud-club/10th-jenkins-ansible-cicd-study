@@ -56,14 +56,6 @@ all:
               ansible_host: 203.0.113.20
 ```
 
-Inventory가 의도대로 읽히는지 먼저 확인한다.
-
-```bash
-ansible-inventory -i inventory.ini --graph
-ansible-inventory -i inventory.ini --host web01
-ansible all -i inventory.ini --list-hosts
-```
-
 `all`은 모든 호스트를 포함하는 기본 그룹이고 `ungrouped`는 별도 그룹에 속하지 않은 호스트를 포함한다.
 
 ### INI와 YAML 비교
@@ -136,11 +128,6 @@ inventories/
 │   └── hosts.yml
 └── production/
     └── hosts.yml
-```
-
-```bash
-ansible-playbook -i inventories/development site.yml
-ansible-playbook -i inventories/production site.yml
 ```
 
 ---
@@ -244,11 +231,7 @@ Magic Variable은 Ansible이 자동으로 제공하는 예약 변수이므로 �
     http_port: 80
 ```
 
-```bash
-ansible-playbook site.yml -e "http_port=8080"
-```
-
-같은 이름을 여러 곳에 정의하면 Variable Precedence에 따라 한 값이 선택된다. 전체 우선순위는 길기 때문에 처음에는 다음 관계를 기억하면 된다.
+같은 이름을 여러 곳에 정의하면 Variable Precedence에 따라 한 값이 선택된다.
 
 ```text
 낮음                                            높음
@@ -256,6 +239,10 @@ Role defaults → Group vars → Host vars → Play/Task vars → Extra vars
 ```
 
 `--extra-vars`, `-e`로 전달한 변수는 항상 높은 우선순위를 가진다. 다만 우선순위에 의존해 같은 변수를 여러 곳에서 재정의하면 실제 값을 추적하기 어렵다.
+
+```bash
+ansible-playbook site.yml -e "http_port=8080"
+```
 
 ### 실습: 같은 변수의 최종값 확인
 
@@ -344,13 +331,6 @@ amazon.aws.aws_ec2 Inventory Plugin
 Ansible Inventory
 ```
 
-AWS EC2 Inventory Plugin을 사용하려면 Collection과 Python SDK가 필요하다.
-
-```bash
-ansible-galaxy collection install amazon.aws
-python3 -m pip install boto3 botocore
-```
-
 개념적인 Inventory source는 다음과 같다.
 
 ```yaml
@@ -370,7 +350,7 @@ keyed_groups:
 ansible-inventory -i inventory.aws_ec2.yml --graph
 ```
 
-AWS 자격 증명을 저장소에 직접 작성하지 않고 AWS CLI profile, 환경 변수, IAM Role 등 표준 인증 방식을 사용한다. Dynamic Inventory는 이번 주차에 구조와 필요성을 이해하는 정도로 학습한다.
+AWS 자격 증명을 저장소에 직접 작성하지 않고 AWS CLI profile, 환경 변수, IAM Role 등 표준 인증 방식을 사용한다. 
 
 ---
 

@@ -45,11 +45,6 @@ namespace collection module
 
 FQCN은 Module의 출처를 명확하게 하고 이름 충돌을 피한다.
 
-```bash
-ansible-doc ansible.builtin.package
-ansible-doc ansible.builtin.copy
-```
-
 관련 Module과 Plugin, Role 등을 묶어 배포하는 단위를 Collection이라고 한다.
 
 ---

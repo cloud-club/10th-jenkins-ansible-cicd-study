@@ -25,18 +25,9 @@ Managed node
 
 `ansible`, `ansible-playbook`, `ansible-inventory`, `ansible-vault`와 같은 Ansible CLI를 실행하는 시스템이다. Inventory, Playbook, SSH Key도 일반적으로 Control node에서 관리한다.
 
-```bash
-ansible --version
-ansible-inventory -i inventory.ini --graph
-ansible web -i inventory.ini -m ansible.builtin.ping
-ansible-playbook -i inventory.ini site.yml
-```
-
 ### Managed node
 
 Ansible이 관리하는 서버나 네트워크 장비로 `host`라고도 한다. 일반적으로 Managed node에는 Ansible을 설치하지 않는다. Control node가 SSH로 접속해 필요한 Module을 전송하고 실행한다.
-
-Linux에서 대부분의 Module을 사용하려면 Managed node에 Python이 필요하다. Python 설치 전에도 `ansible.builtin.raw`처럼 Python을 요구하지 않는 일부 Module은 사용할 수 있다.
 
 ---
 
@@ -62,36 +53,6 @@ Agent의 설치, 업데이트, 프로세스 감시가 필요하지 않아 관리
 
 ## SSH 연결과 Key 인증
 
-Ansible을 사용하기 전에 일반 SSH 접속부터 확인해야 한다.
-
-```bash
-ssh -i ~/.ssh/gabia_ed25519 ubuntu@203.0.113.10
-```
-
-직접 접속이 성공한 뒤 Inventory에 같은 정보를 작성한다.
-
-```ini
-[web]
-gabia-web ansible_host=203.0.113.10
-
-[web:vars]
-ansible_user=ubuntu
-ansible_ssh_private_key_file=~/.ssh/gabia_ed25519
-```
-
-```bash
-ansible web -i inventory.ini -m ansible.builtin.ping
-```
-
-`ansible.builtin.ping`은 ICMP ping이 아니다. Ansible이 SSH로 연결하고 대상에서 Python 기반 Module을 실행한 뒤 `pong`을 반환할 수 있는지 확인한다.
-
-Playbook이 Inventory를 직접 읽는 것은 아니다. `ansible-playbook` 명령이 `-i`로 지정한 Inventory와 Playbook을 함께 읽고, Playbook의 `hosts`와 같은 이름의 Inventory Host 또는 Group을 연결한다.
-
-```text
-Inventory → 어디에, 어떤 계정과 연결 방식으로 접속할지
-Playbook  → 접속한 대상에서 어떤 작업을 실행할지
-```
-
 ### 주요 연결 변수
 
 | 변수 | 의미 |
@@ -103,13 +64,6 @@ Playbook  → 접속한 대상에서 어떤 작업을 실행할지
 | `ansible_ssh_private_key_file` | 사용할 Private Key 경로 |
 | `ansible_ssh_common_args` | 모든 SSH 명령에 추가할 옵션 |
 | `ansible_python_interpreter` | Managed node에서 사용할 Python 경로 |
-
-Private Key에 암호가 설정되어 있다면 평문으로 암호를 저장하기보다 `ssh-agent`를 사용하는 것이 좋다.
-
-```bash
-ssh-add ~/.ssh/gabia_ed25519
-ssh-add -l
-```
 
 Private Key나 비밀번호는 Git 저장소에 커밋하지 않는다. 비밀번호 형태의 민감한 변수가 꼭 필요하면 Ansible Vault로 암호화한다.
 
@@ -159,6 +113,20 @@ ansible web -i inventory.local.ini \
   -m ansible.builtin.ping
 ```
 
+Ansible이 SSH로 연결하고 대상에서 Python 기반 Module을 실행한 뒤 `pong`을 반환할 수 있는지 확인한다.
+
+연결 과정은 다음과 같다.
+
+```text
+1. Inventory에서 서버 주소, 사용자, Private Key 경로 확인
+2. Managed node의 SSH 서버에 연결
+3. Private Key로 서명하고 서버에 등록된 Public Key로 인증
+4. 필요한 Ansible Module을 전송해 실행
+5. 실행 결과를 받은 뒤 SSH 연결 종료
+```
+
+Private Key 자체가 서버로 전송되는 것은 아니다. Ansible은 명령을 실행할 때 SSH 연결을 만들고, 작업이 끝나면 연결을 종료한다.
+
 SSH Agent는 Private Key를 서버에 전달하지 않고 Control node에서 인증용 서명을 수행한다. macOS Keychain에도 passphrase를 저장하려면 다음 옵션을 사용할 수 있다.
 
 ```bash
@@ -186,9 +154,11 @@ SSH 접속 사용자와 관리 작업을 수행할 사용자는 다를 수 있�
         state: present
 ```
 
-- `become: true`: 권한 상승 사용
+- Play 수준의 `become: true`: 해당 Play의 모든 Task에 권한 상승 적용
 - `become_user`: 권한 상승 후 작업을 실행할 사용자, 기본값은 보통 `root`
 - `become_method`: `sudo`, `su` 등 권한 상승 방식
+
+다음 Play에는 자동으로 이어지지 않는다. 다른 Play에서도 관리자 권한이 필요하면 그 Play에 `become: true`를 다시 지정해야 한다.
 
 특정 Task에만 적용할 수도 있다.
 
@@ -200,14 +170,6 @@ SSH 접속 사용자와 관리 작업을 수행할 사용자는 다를 수 있�
   become_user: app
   changed_when: false
 ```
-
-`sudo`가 비밀번호를 요구한다면 실행 시 물어보도록 할 수 있다.
-
-```bash
-ansible-playbook -i inventory.ini site.yml --ask-become-pass
-```
-
-`ansible_become_password`를 Inventory에 평문으로 저장하지 않는다.
 
 ### 실습: 일반 사용자와 `become` 비교
 
@@ -257,7 +219,7 @@ ansible-doc -t connection ssh
 
 일반 Linux 서버에서는 기본 OpenSSH 기반 `ssh` Plugin을 사용한다. OpenSSH 설정의 `ControlPersist`와 `~/.ssh/config`도 활용할 수 있다.
 
-`local`은 로컬 VM이라는 뜻이 아니라 **현재 Ansible이 실행되는 Control node 자체**를 의미한다. Mac에서 Ansible을 실행하면 Mac이 대상이고, 컨테이너나 VM 안에서 Ansible을 실행하면 해당 실행 환경이 대상이 된다.
+`local`은 현재 Ansible이 실행되는 Control node 자체를 대상으로 한다.
 
 ### 실습: `ssh`와 `local` Connection 비교
 
@@ -322,28 +284,6 @@ Host 10.0.*
   User ubuntu
   ProxyJump bastion
 ```
-
----
-
-## 연결 확인 순서
-
-```text
-1. 일반 SSH 접속 확인
-2. Inventory 문법과 대상 확인
-3. Ansible ping 실행
-4. 일반 사용자 권한으로 명령 실행
-5. become을 사용하는 관리 작업 확인
-```
-
-```bash
-ssh ubuntu@203.0.113.10
-ansible-inventory -i inventory.ini --graph
-ansible web -i inventory.ini -m ansible.builtin.ping
-ansible web -i inventory.ini -m ansible.builtin.command -a "id"
-ansible web -i inventory.ini -b -m ansible.builtin.command -a "id"
-```
-
-SSH 연결 실패와 Ansible 실행 실패를 구분하기 위해 항상 일반 SSH부터 확인한다.
 
 ---
 
