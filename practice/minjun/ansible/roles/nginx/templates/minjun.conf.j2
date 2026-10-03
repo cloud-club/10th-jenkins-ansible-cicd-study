@@ -1,0 +1,24 @@
+# Managed by Ansible ({{ owner }}). Do not edit by hand.
+# active_color={{ active_color }} port={{ nginx_active_port }}
+
+upstream {{ nginx_upstream }} {
+{% for h in groups['app'] %}
+    server {{ hostvars[h].ansible_host }}:{{ nginx_active_port }} max_fails=1 fail_timeout=5s;
+{% endfor %}
+}
+
+server {
+    listen {{ lb_port }};
+
+    location / {
+        proxy_pass http://{{ nginx_upstream }};
+        proxy_set_header Host $host;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 5s;
+        proxy_next_upstream error timeout http_502 http_503;
+
+        # 어느 서버가 응답했는지 헤더로 확인 (2주차 트래픽 흐름 기록용)
+        add_header X-Upstream $upstream_addr always;
+        add_header X-Color {{ active_color }} always;
+    }
+}

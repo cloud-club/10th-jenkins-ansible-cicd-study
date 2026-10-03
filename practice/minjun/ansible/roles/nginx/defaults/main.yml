@@ -1,0 +1,6 @@
+---
+nginx_conf: "/etc/nginx/conf.d/{{ owner }}.conf"
+nginx_stage: "/tmp/{{ owner }}-nginx/{{ owner }}.conf"   # conf.d 밖에서 먼저 렌더링
+nginx_lock: /var/lock/nginx-cicd.lock                     # 스터디 공용 락으로 제안할 경로
+nginx_upstream: "{{ owner }}_backend"                     # 이름 충돌 방지 (sohyeon_backend 패턴)
+nginx_active_port: "{{ app_ports[active_color] }}"
