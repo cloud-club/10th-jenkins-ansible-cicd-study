@@ -1,0 +1,20 @@
+# 실습 앱의 기본 응답과 상태·버전 확인 엔드포인트 설정
+server {
+    listen 80;
+    server_name _;
+
+    location = /health {
+        default_type text/plain;
+        return 200 "OK\n";
+    }
+
+    location = /version {
+        default_type text/plain;
+        return 200 "${APP_VERSION}\n";
+    }
+
+    location / {
+        default_type text/plain;
+        return 200 "Sohyeon Jenkins + Ansible CI/CD\n";
+    }
+}

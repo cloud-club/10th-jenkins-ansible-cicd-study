@@ -1,0 +1,8 @@
+# 앱 서버에 app role을 실행하는 배포 플레이북
+---
+- name: Deploy Sohyeon CI/CD application
+  hosts: app_servers
+  gather_facts: false
+
+  roles:
+    - role: app 

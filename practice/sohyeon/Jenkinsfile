@@ -1,0 +1,264 @@
+// Docker 이미지 빌드·테스트와 Ansible 배포·검증 파이프라인
+pipeline {
+    agent {
+        label 'ansible-agent'
+    }
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    parameters {
+        booleanParam(
+            name: 'CONFIGURE_NGINX',
+            defaultValue: false,
+            description: '공용 Nginx의 sohyeon.conf를 설정/변경할 때만 활성화'
+        )
+    }
+
+    environment {
+        // 공용 레포 루트 기준 프로젝트 경로
+        PROJECT_DIR = 'practice/sohyeon'
+        IMAGE_NAME = 'sohyeon-cicd-app'
+        TEST_CONTAINER = 'sohyeon-cicd-test'
+        // NGINX_URL = 'http://1.201.116.156:18007'
+    }
+
+    stages {
+
+        stage('Check Environment') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        echo "=== Jenkins Agent ==="
+                        hostname
+                        whoami
+                        id
+                        pwd
+
+                        echo "=== Docker Socket ==="
+                        ls -l /var/run/docker.sock
+
+                        echo "=== Docker Group Test ==="
+                        sg docker -c "docker ps"
+
+                        echo "=== Required Tools ==="
+                        docker --version
+                        ansible --version
+                        git --version
+                        curl --version
+                        ssh -V
+                    '''
+                }
+            }
+        }
+
+
+        stage('Build') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        sg docker -c \
+                        "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} ."
+                    '''
+                }
+            }
+        }
+
+
+        stage('Test') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        echo "=== Test Docker Image ==="
+
+                        sg docker -c \
+                        "docker rm -f ${TEST_CONTAINER}" \
+                        2>/dev/null || true
+
+                        sg docker -c \
+                        "docker run -d \
+                        --name ${TEST_CONTAINER} \
+                        -e APP_VERSION=v${BUILD_NUMBER} \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}"
+
+                        sleep 2
+
+                        HEALTH_RESULT=$(
+                        sg docker -c \
+                            "docker exec ${TEST_CONTAINER} \
+                            wget -qO- http://127.0.0.1/health"
+                        )
+
+                        VERSION_RESULT=$(
+                        sg docker -c \
+                            "docker exec ${TEST_CONTAINER} \
+                            wget -qO- http://127.0.0.1/version"
+                        )
+
+                        echo "health=${HEALTH_RESULT}"
+                        echo "version=${VERSION_RESULT}"
+
+                        test "${HEALTH_RESULT}" = "OK"
+                        test "${VERSION_RESULT}" = "v${BUILD_NUMBER}"
+
+                        sg docker -c \
+                        "docker rm -f ${TEST_CONTAINER}"
+                    '''
+                }
+            }
+        }
+
+
+        stage('Prepare Artifact') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        mkdir -p .artifacts
+
+                        sg docker -c \
+                        "docker save \
+                        -o .artifacts/${IMAGE_NAME}.tar \
+                        ${IMAGE_NAME}:${BUILD_NUMBER}"
+                    '''
+                }
+            }
+        }
+
+
+        stage('Prepare SSH') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        echo "=== Prepare Private known_hosts ==="
+
+                        mkdir -p .ssh
+                        chmod 700 .ssh
+
+                        : > .ssh/known_hosts
+
+                        ssh-keyscan -H \
+                          1.201.118.202 \
+                          1.201.118.10 \
+                          1.201.118.90 \
+                          1.201.116.156 \
+                          >> .ssh/known_hosts
+
+                        chmod 600 .ssh/known_hosts
+                    '''
+                }
+            }
+        }
+
+
+        stage('Deploy') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'sohyeon-deploy-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    dir(env.PROJECT_DIR) {
+                        sh '''
+                            echo "=== Deploy to App Servers ==="
+
+                            export ANSIBLE_PRIVATE_KEY_FILE="${SSH_KEY}"
+                            export ANSIBLE_REMOTE_USER="${SSH_USER}"
+                            export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=${WORKSPACE}/${PROJECT_DIR}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+
+                            ansible-playbook \
+                              -i ansible/inventory.ini \
+                              ansible/deploy.yml \
+                              --limit app_servers \
+                              -e "image_name=${IMAGE_NAME}" \
+                              -e "image_tag=${BUILD_NUMBER}" \
+                              -e "image_tar=${WORKSPACE}/${PROJECT_DIR}/.artifacts/${IMAGE_NAME}.tar"
+                        '''
+                    }
+                }
+            }
+        }
+
+
+        stage('Configure Nginx') {
+            when {
+                expression {
+                    return params.CONFIGURE_NGINX
+                }
+            }
+
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'sohyeon-deploy-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    dir(env.PROJECT_DIR) {
+                        sh '''
+                            echo "=== Configure Sohyeon Nginx ==="
+
+                            export ANSIBLE_PRIVATE_KEY_FILE="${SSH_KEY}"
+                            export ANSIBLE_REMOTE_USER="${SSH_USER}"
+                            export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=${WORKSPACE}/${PROJECT_DIR}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+
+                            ansible-playbook \
+                              -i ansible/inventory.ini \
+                              ansible/nginx.yml \
+                              --limit load_balancer
+                        '''
+                    }
+                }
+            }
+        }
+
+
+        stage('Verify') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'sohyeon-deploy-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    dir(env.PROJECT_DIR) {
+                        sh '''
+                            echo "=== Verify Through Nginx ==="
+
+                            export ANSIBLE_PRIVATE_KEY_FILE="${SSH_KEY}"
+                            export ANSIBLE_REMOTE_USER="${SSH_USER}"
+                            export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=${WORKSPACE}/${PROJECT_DIR}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+
+                            ansible-playbook \
+                            -i ansible/inventory.ini \
+                            ansible/verify.yml \
+                            --limit load_balancer \
+                            -e "image_tag=${BUILD_NUMBER}"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+
+    post {
+        always {
+            dir(env.PROJECT_DIR) {
+                sh '''
+                    sg docker -c \
+                    "docker rm -f ${TEST_CONTAINER}" \
+                    2>/dev/null || true
+
+                    rm -rf .artifacts
+                    rm -rf .ssh
+                '''
+            }
+        }
+    }
+}
