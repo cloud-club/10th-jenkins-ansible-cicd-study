@@ -7,7 +7,7 @@ Jenkins Agent에서 FastAPI 이미지를 빌드·테스트하고 Docker Hub에 P
 ```text
 dongwook/
 ├── README.md
-├── Jenkinsfile                         # Build / Test / Push / Deploy / Verify
+├── Jenkinsfile                         # CI: 테스트·빌드 / CD: Push·배포·검증
 ├── .gitignore                          # 키, 환경변수, 임시 산출물 제외
 ├── app/
 │   ├── Dockerfile
@@ -64,11 +64,13 @@ dongwook/
 1. [환경 준비](docs/setup.md)에 따라 개인 Jenkins Folder, SCM, Credentials 및 Nginx 라우팅을 준비한다.
 2. Jenkins UI의 `dongwook/deploy-pipeline`에서 **Build with Parameters**로 `APP_VERSION`(기본 `v1`)을 입력한다. 첫 실행은 **Build Now**로 기본값을 사용하고 이후 파라미터 메뉴가 표시될 수 있다.
 3. Agent가 GitHub 소스를 체크아웃하고 `<APP_VERSION>-<commit 12자리>-<build 번호>`를 고유한 `RELEASE_ID`이자 이미지 태그로 사용한다.
-4. 이미지를 한 번 빌드한 뒤 해당 이미지의 `/health`, `/version` HTTP 응답과 빌드 정보를 검사한다. 테스트 컨테이너는 호스트 포트를 사용하지 않으며 종료 시 삭제한다.
+4. `CI: Python Test`에서 `test_main.py`를 실행한다. 통과하면 이미지를 한 번 빌드한 뒤 `CI: Test Image`에서 `/health`, `/version` HTTP 응답과 빌드 정보를 검사한다. 테스트 컨테이너는 호스트 포트를 사용하지 않으며 종료 시 삭제한다.
 5. `dockerhub-credentials`의 Username과 액세스 토큰으로 `<Docker Hub ID>/dongwook-app`에 Push한다. Ansible은 같은 Credential로 인증하고 `repository@sha256:...` 형식으로 Pull한다. Private Repository도 지원한다.
 6. 서버별 `dongwook-app` 컨테이너를 순서대로 교체하고 상태와 버전을 검사한다. 실패하면 후속 서버 배포를 중단한다.
 7. Agent에서 세 App 서버와 Nginx에 직접 요청하여 표시 버전과 고유 `release`가 일치하는지 검증한다.
 8. Jenkins Artifact의 `deploy-vars.json`에 이미지 digest와 빌드 정보를 보관한다. [결과 기록](docs/results.md)에 실행 URL과 응답을 남긴다.
+
+Jenkinsfile은 `CI:`와 `CD:` 접두사가 붙은 개별 Stage로 구분한다. CI는 소스 확인 → Python 테스트 → 이미지 빌드 → 이미지 실행 테스트, CD는 Docker Hub Push → Ansible 배포 → 결과 검증 순서다. 별도 Job이나 중첩 Stage 없이 Jenkins 화면에서 각 단계의 성공·실패를 확인할 수 있다.
 
 ## 앱 구성과 이후 배포 전략 실습
 

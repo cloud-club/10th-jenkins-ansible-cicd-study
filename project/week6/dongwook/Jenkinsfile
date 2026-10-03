@@ -1,5 +1,6 @@
 pipeline {
     agent { label 'ansible-agent' }
+
     options {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
@@ -7,16 +8,24 @@ pipeline {
         timeout(time: 30, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
+
     parameters {
-        string(name: 'APP_VERSION', defaultValue: 'v1', trim: true,
-            description: '응답에 표시할 버전 (예: v1, v2, 1.0.0)')
+        string(
+            name: 'APP_VERSION',
+            defaultValue: 'v1',
+            trim: true,
+            description: '응답에 표시할 버전 (예: v1, v2, 1.0.0)'
+        )
     }
+
     environment {
         PROJECT_DIR = 'project/week6/dongwook'
         DOCKERHUB_REPOSITORY = 'dongwook-app'
     }
+
     stages {
-        stage('Checkout') {
+        // CI: 소스 확인, Python 테스트, 이미지 빌드와 실행 검증
+        stage('CI: Checkout') {
             steps {
                 checkout scm
                 script {
@@ -27,8 +36,14 @@ pipeline {
                     env.GIT_REVISION = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
                     env.RELEASE_ID = "${params.APP_VERSION}-${env.GIT_REVISION.take(12)}-${env.BUILD_NUMBER}"
                 }
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials',
-                    usernameVariable: 'DOCKERHUB_USERNAME', passwordVariable: 'DOCKERHUB_TOKEN')]) {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
+                ]) {
                     script {
                         if (!(env.DOCKERHUB_USERNAME ==~ /[a-z0-9][a-z0-9_-]*/)) {
                             error('dockerhub-credentials의 Username에는 Docker Hub ID를 입력하세요.')
@@ -39,25 +54,44 @@ pipeline {
                 }
             }
         }
-        stage('Build') {
+
+        stage('CI: Python Test') {
             steps {
                 dir(env.PROJECT_DIR) {
                     sh '''
-                        docker build --build-arg "APP_VERSION=$APP_VERSION" \
-                            --build-arg "RELEASE_ID=$RELEASE_ID" \
-                            --build-arg "GIT_REVISION=$GIT_REVISION" -t "$IMAGE_TAG" app
+                        set -eu
+                        python3 -m venv .venv
+                        .venv/bin/python -m pip install --disable-pip-version-check \
+                            -r app/requirements.txt
+                        (cd app && ../.venv/bin/python -m unittest discover -s tests -v)
                     '''
                 }
             }
         }
-        stage('Test') {
+
+        stage('CI: Build Image') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        docker build \
+                            --build-arg "APP_VERSION=$APP_VERSION" \
+                            --build-arg "RELEASE_ID=$RELEASE_ID" \
+                            --build-arg "GIT_REVISION=$GIT_REVISION" \
+                            -t "$IMAGE_TAG" app
+                    '''
+                }
+            }
+        }
+
+        stage('CI: Test Image') {
             steps {
                 dir(env.PROJECT_DIR) {
                     // 실제 배포할 이미지를 실행하고, 호스트 포트 없이 HTTP 응답을 검사한다.
                     sh '''
                         set -eu
                         mkdir -p .artifacts
-                        docker run -d --label owner=dongwook "$IMAGE_TAG" > .artifacts/test-container
+                        docker run -d --label owner=dongwook "$IMAGE_TAG" \
+                            > .artifacts/test-container
                         container_id=$(cat .artifacts/test-container)
                         trap 'docker rm -f "$container_id" >/dev/null' EXIT
                         for attempt in $(seq 1 20); do
@@ -80,10 +114,17 @@ for path in ("/health", "/version"):
                 }
             }
         }
-        stage('Push') {
+
+        // CD: 검증한 이미지를 게시하고 세 서버에 배포한 뒤 응답 확인
+        stage('CD: Push Image') {
             steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials',
-                    usernameVariable: 'DOCKERHUB_USERNAME', passwordVariable: 'DOCKERHUB_TOKEN')]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
+                ]) {
                     dir(env.PROJECT_DIR) {
                         sh '''
                             set -eu
@@ -95,7 +136,8 @@ for path in ("/health", "/version"):
                             printf '%s' "$DOCKERHUB_TOKEN" | docker login \
                                 --username "$DOCKERHUB_USERNAME" --password-stdin
                             docker push "$IMAGE_TAG"
-                            docker image inspect "$IMAGE_TAG" > .artifacts/image-inspect.json
+                            docker image inspect "$IMAGE_TAG" \
+                                > .artifacts/image-inspect.json
                             python3 - <<'PY'
 import json, os, re
 from pathlib import Path
@@ -119,14 +161,24 @@ PY
                 }
             }
         }
-        stage('Deploy') {
+
+        stage('CD: Deploy') {
             steps {
                 withCredentials([
-                    sshUserPrivateKey(credentialsId: 'dongwook-deploy-ssh',
-                        keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
-                    file(credentialsId: 'dongwook-known-hosts', variable: 'KNOWN_HOSTS'),
-                    usernamePassword(credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKERHUB_USERNAME', passwordVariable: 'DOCKERHUB_TOKEN')
+                    sshUserPrivateKey(
+                        credentialsId: 'dongwook-deploy-ssh',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    ),
+                    file(
+                        credentialsId: 'dongwook-known-hosts',
+                        variable: 'KNOWN_HOSTS'
+                    ),
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
                 ]) {
                     dir(env.PROJECT_DIR) {
                         sh '''
@@ -145,18 +197,28 @@ PY
                 }
             }
         }
-        stage('Verify') {
+
+        stage('CD: Verify') {
             steps {
                 dir(env.PROJECT_DIR) {
-                    sh 'python3 scripts/verify.py --version "$APP_VERSION" --release "$RELEASE_ID"'
+                    sh '''
+                        python3 scripts/verify.py \
+                            --version "$APP_VERSION" \
+                            --release "$RELEASE_ID"
+                    '''
                 }
             }
         }
     }
+
     post {
         always {
             dir(env.PROJECT_DIR) {
-                archiveArtifacts artifacts: '.artifacts/deploy-vars.json', allowEmptyArchive: true
+                archiveArtifacts(
+                    artifacts: '.artifacts/deploy-vars.json',
+                    allowEmptyArchive: true
+                )
+
                 // 현재 Workspace의 임시 인증 파일 및 이번 빌드의 리소스만 정리한다.
                 sh '''
                     set +x
