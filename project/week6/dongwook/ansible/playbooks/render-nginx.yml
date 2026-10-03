@@ -1,0 +1,8 @@
+---
+# 공통 Nginx에는 접속하지 않고 개인 설정 파일만 로컬에 생성한다.
+- name: Render Dongwook's Nginx configuration for review
+  hosts: load_balancers
+  gather_facts: false
+  connection: local
+  roles:
+    - nginx

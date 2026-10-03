@@ -1,0 +1,173 @@
+pipeline {
+    agent { label 'ansible-agent' }
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+    parameters {
+        string(name: 'APP_VERSION', defaultValue: 'v1', trim: true,
+            description: '응답에 표시할 버전 (예: v1, v2, 1.0.0)')
+    }
+    environment {
+        PROJECT_DIR = 'project/week6/dongwook'
+        DOCKERHUB_REPOSITORY = 'dongwook-app'
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    if (!(params.APP_VERSION ==~ /[A-Za-z0-9][A-Za-z0-9_.-]{0,39}/)) {
+                        error('APP_VERSION은 영문/숫자로 시작하는 1~40자의 영문, 숫자, _, ., - 값이어야 합니다.')
+                    }
+                    env.APP_VERSION = params.APP_VERSION
+                    env.GIT_REVISION = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    env.RELEASE_ID = "${params.APP_VERSION}-${env.GIT_REVISION.take(12)}-${env.BUILD_NUMBER}"
+                }
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKERHUB_USERNAME', passwordVariable: 'DOCKERHUB_TOKEN')]) {
+                    script {
+                        if (!(env.DOCKERHUB_USERNAME ==~ /[a-z0-9][a-z0-9_-]*/)) {
+                            error('dockerhub-credentials의 Username에는 Docker Hub ID를 입력하세요.')
+                        }
+                        env.IMAGE_REPOSITORY = "${env.DOCKERHUB_USERNAME}/${env.DOCKERHUB_REPOSITORY}"
+                        env.IMAGE_TAG = "${env.IMAGE_REPOSITORY}:${env.RELEASE_ID}"
+                    }
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        docker build --build-arg "APP_VERSION=$APP_VERSION" \
+                            --build-arg "RELEASE_ID=$RELEASE_ID" \
+                            --build-arg "GIT_REVISION=$GIT_REVISION" -t "$IMAGE_TAG" app
+                    '''
+                }
+            }
+        }
+        stage('Test') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    // 실제 배포할 이미지를 실행하고, 호스트 포트 없이 HTTP 응답을 검사한다.
+                    sh '''
+                        set -eu
+                        mkdir -p .artifacts
+                        docker run -d --label owner=dongwook "$IMAGE_TAG" > .artifacts/test-container
+                        container_id=$(cat .artifacts/test-container)
+                        trap 'docker rm -f "$container_id" >/dev/null' EXIT
+                        for attempt in $(seq 1 20); do
+                            if docker exec "$container_id" python -c '
+import json, os, urllib.request
+for path in ("/health", "/version"):
+    with urllib.request.urlopen("http://127.0.0.1:8080" + path, timeout=2) as response:
+        body = json.load(response)
+    assert body["version"] == os.environ["APP_VERSION"]
+    assert body["release"] == os.environ["RELEASE_ID"]
+    assert body["revision"] == os.environ["GIT_REVISION"]
+    if path == "/health":
+        assert body["status"] == "ok"
+'; then exit 0; fi
+                            sleep 1
+                        done
+                        docker logs "$container_id"
+                        exit 1
+                    '''
+                }
+            }
+        }
+        stage('Push') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKERHUB_USERNAME', passwordVariable: 'DOCKERHUB_TOKEN')]) {
+                    dir(env.PROJECT_DIR) {
+                        sh '''
+                            set -eu
+                            set +x
+                            umask 077
+                            export DOCKER_CONFIG="$PWD/.artifacts/docker-config"
+                            mkdir -p "$DOCKER_CONFIG"
+                            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+                            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
+                                --username "$DOCKERHUB_USERNAME" --password-stdin
+                            docker push "$IMAGE_TAG"
+                            docker image inspect "$IMAGE_TAG" > .artifacts/image-inspect.json
+                            python3 - <<'PY'
+import json, os, re
+from pathlib import Path
+
+image = json.loads(Path(".artifacts/image-inspect.json").read_text())[0]
+repository = os.environ["IMAGE_REPOSITORY"]
+image_ref = next(ref for ref in image["RepoDigests"] if ref.startswith(repository + "@sha256:"))
+if not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", image_ref):
+    raise ValueError("Invalid image digest")
+Path(".artifacts/deploy-vars.json").write_text(json.dumps({
+    "image_repository": repository,
+    "image_ref": image_ref,
+    "app_version": os.environ["APP_VERSION"],
+    "release_id": os.environ["RELEASE_ID"],
+    "git_revision": os.environ["GIT_REVISION"],
+}, indent=2))
+print("Deploy image:", image_ref)
+PY
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Deploy') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(credentialsId: 'dongwook-deploy-ssh',
+                        keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
+                    file(credentialsId: 'dongwook-known-hosts', variable: 'KNOWN_HOSTS'),
+                    usernamePassword(credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKERHUB_USERNAME', passwordVariable: 'DOCKERHUB_TOKEN')
+                ]) {
+                    dir(env.PROJECT_DIR) {
+                        sh '''
+                            set -eu
+                            export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
+                            export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=\\\"$KNOWN_HOSTS\\\""
+                            ansible-inventory -i ansible/inventory/hosts.yml --graph
+                            ansible-playbook -i ansible/inventory/hosts.yml \
+                                ansible/playbooks/deploy.yml --list-hosts
+                            ansible-playbook -i ansible/inventory/hosts.yml \
+                                ansible/playbooks/deploy.yml \
+                                --private-key "$SSH_KEY" --user "$SSH_USER" \
+                                --extra-vars @.artifacts/deploy-vars.json
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Verify') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh 'python3 scripts/verify.py --version "$APP_VERSION" --release "$RELEASE_ID"'
+                }
+            }
+        }
+    }
+    post {
+        always {
+            dir(env.PROJECT_DIR) {
+                archiveArtifacts artifacts: '.artifacts/deploy-vars.json', allowEmptyArchive: true
+                // 현재 Workspace의 임시 인증 파일 및 이번 빌드의 리소스만 정리한다.
+                sh '''
+                    set +x
+                    rm -rf .artifacts/docker-config
+                    if [ -s .artifacts/test-container ]; then
+                        docker rm -f "$(cat .artifacts/test-container)" >/dev/null 2>&1 || true
+                    fi
+                    rm -f .artifacts/test-container .artifacts/image-inspect.json .artifacts/deploy-vars.json
+                    if [ -n "${IMAGE_TAG:-}" ]; then docker image rm "$IMAGE_TAG" || true; fi
+                '''
+            }
+        }
+    }
+}

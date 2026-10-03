@@ -1,0 +1,12 @@
+---
+- name: Create local artifacts directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../../.artifacts"
+    state: directory
+    mode: '0700'
+
+- name: Render personal Nginx configuration locally
+  ansible.builtin.template:
+    src: dongwook.conf.j2
+    dest: "{{ playbook_dir }}/../../.artifacts/dongwook.conf"
+    mode: '0644'
