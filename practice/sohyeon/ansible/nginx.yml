@@ -1,0 +1,8 @@
+# 로드밸런서에 nginx_lb role을 실행하는 Nginx 설정 플레이북
+---
+- name: Configure Sohyeon Nginx load balancer
+  hosts: load_balancer
+  gather_facts: false
+
+  roles:
+    - role: nginx_lb

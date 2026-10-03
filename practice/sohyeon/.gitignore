@@ -1,0 +1,8 @@
+.artifacts/
+.ssh/
+
+*.tar
+*.pem
+*.key
+
+.env

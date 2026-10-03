@@ -1,0 +1,10 @@
+# 앱 컨테이너명·이미지·포트 등 배포 변수 기본값
+---
+app_name: sohyeon-cicd-app
+
+image_name: sohyeon-cicd-app
+image_tag: latest
+image_tar: ""
+
+host_port: 20007
+container_port: 80

@@ -1,0 +1,7 @@
+# 설정 변경 시 Nginx를 다시 불러오는 핸들러
+---
+- name: Reload Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  become: true
