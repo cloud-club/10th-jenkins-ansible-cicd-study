@@ -1,0 +1,55 @@
+---
+# 1) 트래픽을 넘기기 전에 LB에서 각 App 서버 포트에 실제로 닿는지 확인한다.
+#    방화벽이 막혀 있으면 reload 전에 여기서 멈춘다.
+- name: LB can reach each app server on {{ nginx_active_port }}
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ nginx_active_port }}/health"
+    status_code: 200
+    timeout: 5
+  loop: "{{ groups['app'] }}"
+
+# 2) conf.d 밖에서 먼저 렌더링한다. conf.d에 바로 쓰면 검증 전에 다른 사람의 reload에 섞여 들어갈 수 있다.
+- name: Ensure staging dir
+  ansible.builtin.file:
+    path: "{{ nginx_stage | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Render my nginx conf to staging
+  ansible.builtin.template:
+    src: minjun.conf.j2
+    dest: "{{ nginx_stage }}"
+    mode: "0644"
+
+# 3) 락 안에서: 비교 → 백업 → 교체 → nginx -t → reload. -t가 실패하면 원복하고 reload하지 않는다.
+#    nginx -t는 7명 설정 전체를 검사하므로, 남의 설정 오류로 실패해도 내 변경만 되돌리고 멈춘다.
+- name: Apply conf under lock (backup, nginx -t, reload)
+  ansible.builtin.shell: |
+    set -u
+    NEW="{{ nginx_stage }}"
+    CUR="{{ nginx_conf }}"
+    BAK="{{ nginx_stage | dirname }}/{{ owner }}.conf.bak"
+    exec 9>"{{ nginx_lock }}"
+    flock -w 60 9 || { echo "LOCK_TIMEOUT"; exit 1; }
+
+    if [ -f "$CUR" ] && cmp -s "$NEW" "$CUR"; then
+      echo "UNCHANGED"; exit 0
+    fi
+
+    if [ -f "$CUR" ]; then cp -p "$CUR" "$BAK"; else rm -f "$BAK"; fi
+    cp "$NEW" "$CUR"
+
+    if ! nginx -t 2>&1; then
+      if [ -f "$BAK" ]; then cp -p "$BAK" "$CUR"; else rm -f "$CUR"; fi
+      echo "NGINX_TEST_FAILED (my change reverted)"; exit 1
+    fi
+
+    systemctl reload nginx && echo "RELOADED"
+  args:
+    executable: /bin/bash
+  register: apply
+  changed_when: "'RELOADED' in apply.stdout"
+
+- name: Show apply result
+  ansible.builtin.debug:
+    var: apply.stdout_lines

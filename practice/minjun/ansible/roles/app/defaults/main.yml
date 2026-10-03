@@ -1,0 +1,7 @@
+---
+# 색 하나 = 컨테이너 하나 = 포트 하나.
+# 1주차는 blue만 쓰지만 2주차에 green을 추가할 때 이 Role을 그대로 재사용한다.
+app_color: blue
+app_port: "{{ app_ports[app_color] }}"
+app_container: "{{ owner }}-app-{{ app_color }}"
+app_stage_dir: "/opt/{{ owner }}/images"

@@ -1,0 +1,47 @@
+---
+# Nginx(18006)를 통해 요청을 여러 번 보내서
+#  1) 모든 응답의 version이 방금 배포한 버전인지
+#  2) App 서버 3대가 모두 응답했는지
+# 를 확인한다. LB 서버 안에서 127.0.0.1:18006으로 호출하므로 Agent의 방화벽 등록 여부와 무관하다.
+
+- name: Verify through nginx
+  hosts: lb
+  gather_facts: false
+  vars:
+    requests: 12
+  tasks:
+    - name: Call /version through nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lb_port }}/version"
+        return_content: true
+        timeout: 5
+      register: resp
+      loop: "{{ range(requests) | list }}"
+      loop_control:
+        label: "request {{ item }}"
+
+    - name: Summarize responses
+      ansible.builtin.set_fact:
+        seen_hosts: "{{ resp.results | map(attribute='json.host') | list }}"
+        seen_versions: "{{ resp.results | map(attribute='json.version') | unique | list }}"
+
+    - name: Show distribution
+      ansible.builtin.debug:
+        msg: >-
+          versions={{ seen_versions }}
+          counts={{ seen_hosts | community.general.counter }}
+
+    - name: Assert all responses are the deployed version
+      ansible.builtin.assert:
+        that: seen_versions == [app_version]
+        fail_msg: "expected only {{ app_version }}, got {{ seen_versions }}"
+
+    - name: Assert all app servers served traffic
+      ansible.builtin.assert:
+        that: (seen_hosts | unique | length) == (groups['app'] | length)
+        fail_msg: "only {{ seen_hosts | unique }} answered; expected {{ groups['app'] }}"
+
+    - name: Check /health through nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lb_port }}/health"
+        status_code: 200
