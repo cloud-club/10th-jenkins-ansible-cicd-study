@@ -183,15 +183,6 @@ PY
         stage('CD: Deploy') {
             steps {
                 withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: 'dongwook-deploy-ssh',
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
-                    ),
-                    file(
-                        credentialsId: 'dongwook-known-hosts',
-                        variable: 'KNOWN_HOSTS'
-                    ),
                     usernamePassword(
                         credentialsId: 'dockerhub-credentials',
                         usernameVariable: 'DOCKERHUB_USERNAME',
@@ -202,13 +193,12 @@ PY
                         sh '''
                             set -eu
                             export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
-                            export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=\\\"$KNOWN_HOSTS\\\""
+                            # Agent 실행 계정의 SSH 키, SSH 설정, known_hosts를 사용한다.
                             ansible-inventory -i ansible/inventory/hosts.yml --graph
                             ansible-playbook -i ansible/inventory/hosts.yml \
                                 ansible/playbooks/deploy.yml --list-hosts
                             ansible-playbook -i ansible/inventory/hosts.yml \
                                 ansible/playbooks/deploy.yml \
-                                --private-key "$SSH_KEY" --user "$SSH_USER" \
                                 --extra-vars @.artifacts/deploy-vars.json
                         '''
                     }
