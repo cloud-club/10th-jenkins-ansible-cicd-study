@@ -1,6 +1,8 @@
 ---
 - name: Deploy the same image to Dongwook's three app servers
   hosts: app_servers
+  become: true
+  become_user: root
   gather_facts: false
   serial: 1
   any_errors_fatal: true

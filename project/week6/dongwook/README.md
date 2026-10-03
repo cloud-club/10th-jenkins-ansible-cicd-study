@@ -130,6 +130,7 @@ python3 scripts/verify.py --version v1 --release '<Jenkins에서 배포한 RELEA
 - 자신의 Folder, Workspace, `dongwook-` 리소스와 할당 포트만 사용한다. Controller와 Agent에는 Playbook을 배포하지 않는다.
 - 시스템 패키지 설치, Docker 재시작, 서버 재부팅 및 다른 사용자 리소스 변경은 자동화에 포함하지 않는다.
 - SSH는 Agent 실행 계정에 준비한 키와 `~/.ssh/known_hosts`를 사용한다. 대상 서버의 `authorized_keys`에 해당 공개키를 등록하고 호스트 키 확인을 유지한다. SSH 키와 `known_hosts`용 Jenkins Credential은 별도로 사용하지 않는다.
+- App 서버에서는 SSH 접속 후 `become`으로 root 권한을 사용해 배포한다. 현재 Pipeline은 sudo 비밀번호를 주입하지 않으므로 접속 계정에 비밀번호 없는 sudo 권한이 필요하다.
 - Docker Hub 토큰은 `--password-stdin`으로 전달한다. Agent Workspace와 원격 서버에 각각 전용 임시 Docker 설정을 만들고 작업 후 정리한다. 공통 `~/.docker/config.json`을 수정하거나 인증 파일을 Artifact로 보관하지 않는다.
 - Nginx 설정은 로컬에서 생성한다. 실제 반영은 사전 공유한 작업 시간에 공통 잠금 절차로 수행한다.
 - 이 예제는 컨테이너 교체 방식이며 무중단 전환이나 자동 롤백을 구현하지 않는다. 실패하면 일부 서버에 이전 버전이 남을 수 있으므로 응답을 확인한 뒤 원인을 수정하고 재배포한다.
