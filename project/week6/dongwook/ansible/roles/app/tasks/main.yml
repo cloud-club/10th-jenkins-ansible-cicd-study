@@ -75,10 +75,10 @@
   ansible.builtin.set_fact:
     replace_container: >-
       {{ existing_container.rc != 0 or
-         (existing_container.stdout | from_json)[0].Config.Image != image_ref or
-         ('INSTANCE_ID=' ~ inventory_hostname) not in (existing_container.stdout | from_json)[0].Config.Env or
-         ('DEPLOYMENT_SLOT=' ~ deployment_slot) not in (existing_container.stdout | from_json)[0].Config.Env or
-         not (existing_container.stdout | from_json)[0].State.Running }}
+        (existing_container.stdout | from_json)[0].Config.Image != image_ref or
+        ('INSTANCE_ID=' ~ inventory_hostname) not in (existing_container.stdout | from_json)[0].Config.Env or
+        ('DEPLOYMENT_SLOT=' ~ deployment_slot) not in (existing_container.stdout | from_json)[0].Config.Env or
+        not (existing_container.stdout | from_json)[0].State.Running }}
 
 - name: Remove only our previous container
   ansible.builtin.command:
