@@ -28,6 +28,8 @@ dongwook/
 │           ├── tasks/main.yml
 │           └── templates/dongwook.conf.j2
 ├── scripts/
+│   ├── test-image.sh                   # 테스트 컨테이너 실행·대기·HTTP 검증·정리
+│   ├── write-deploy-vars.py            # 이미지 digest와 배포 변수를 JSON으로 저장
 │   └── verify.py                       # Agent에서 Nginx 경유 상태와 release 검증
 └── docs/
     ├── setup.md                        # Jenkins / SSH / Nginx 준비
@@ -50,7 +52,7 @@ dongwook/
 | 항목 | 값 |
 | --- | --- |
 | Jenkins Folder / Job | `dongwook/deploy-pipeline` |
-| Jenkins Agent label | `jenkins-agent` — 실제 공통 Agent label에 맞춰 수정 |
+| Jenkins Agent label | `ansible-agent` |
 | Nginx 서비스 포트 | `18003` |
 | App 호스트 포트 | `20003` |
 | 추가 App 포트 | `21003` — 예약, 기본 구성에서는 사용하지 않음 |
@@ -63,13 +65,13 @@ dongwook/
 1. 개인 Jenkins Folder, SCM, Docker Hub Credential을 준비한다. Agent에서 Nginx 서버로 HTTP 접속할 수 있어야 하고, Ansible 앱 배포를 위한 App 서버 SSH 경로(예: Nginx 서버를 경유하는 SSH 설정)가 준비되어 있어야 한다. App 서버와 Nginx 서버의 배포 계정에는 비밀번호 없는 sudo 권한이 필요하다.
 2. Jenkins UI의 `dongwook/deploy-pipeline`에서 **Build with Parameters**로 `APP_VERSION`(기본 `v1`)을 입력한다. 첫 실행은 **Build Now**로 기본값을 사용하고 이후 파라미터 메뉴가 표시될 수 있다.
 3. Agent가 GitHub 소스를 체크아웃하고 `<APP_VERSION>-<commit 12자리>-<build 번호>`를 고유한 `RELEASE_ID`이자 이미지 태그로 사용한다.
-4. `CI: Python Test`에서 `test_main.py`를 실행한다. 통과하면 이미지를 한 번 빌드한 뒤 `CI: Test Image`에서 `/health`, `/version` HTTP 응답과 빌드 정보를 검사한다. 테스트 컨테이너는 호스트 포트를 사용하지 않으며 종료 시 삭제한다.
+4. `CI`의 `Python Test`에서 `test_main.py`를 실행한다. 통과하면 이미지를 한 번 빌드한 뒤 `Test Image`에서 `scripts/test-image.sh`로 `/health`, `/version` HTTP 응답과 빌드 정보를 검사한다. 테스트 컨테이너는 호스트 포트를 사용하지 않으며 종료 시 삭제한다.
 5. `dockerhub-credentials`의 Username과 액세스 토큰으로 `<Docker Hub ID>/dongwook-app`에 Push한다. Ansible은 같은 Credential로 인증하고 `repository@sha256:...` 형식으로 Pull한다. Private Repository도 지원한다.
 6. 서버별 `dongwook-app` 컨테이너를 순서대로 교체하고 상태와 버전을 검사한다. 세 서버가 모두 성공하면 같은 `deploy.yml`에서 Nginx 템플릿을 `/etc/nginx/conf.d/dongwook.conf`에 배포한다. 설정이 바뀌면 `nginx -t`로 검사한 뒤 Reload한다.
-7. Ansible이 각 App 서버의 로컬 `/health`, `/version` 응답을 검사한다. `CD: Verify`에서는 Agent가 Nginx에만 요청하여 표시 버전과 고유 `release`를 확인한다.
+7. Ansible이 각 App 서버의 로컬 `/health`, `/version` 응답을 검사한다. `CD`의 `Verify`에서는 Agent가 Nginx에만 요청하여 표시 버전과 고유 `release`를 확인한다.
 8. Jenkins Artifact의 `deploy-vars.json`에 이미지 digest와 빌드 정보를 보관한다. [결과 기록](docs/results.md)에 실행 URL과 응답을 남긴다.
 
-Jenkinsfile은 `CI:`와 `CD:` 접두사가 붙은 개별 Stage로 구분한다. CI는 소스 확인 → Python 테스트 → 이미지 빌드 → 이미지 실행 테스트, CD는 Docker Hub Push → Ansible 배포 → 결과 검증 순서다. 별도 Job이나 중첩 Stage 없이 Jenkins 화면에서 각 단계의 성공·실패를 확인할 수 있다.
+Jenkinsfile은 상위 `CI`, `CD` Stage 안에 순차 실행되는 하위 Stage를 둔다. `CI`는 `Checkout` → `Python Test` → `Build Image` → `Test Image`, `CD`는 `Push Image` → `Deploy App + Nginx` → `Verify` 순서다. 모든 단계는 같은 Agent와 Workspace를 사용하며, CI가 성공하면 CD를 실행한다. `Push Image`에서는 `scripts/write-deploy-vars.py`로 배포 변수 파일을 생성하고, Pipeline의 `post { always }`에서 Artifact 보관과 리소스 정리를 수행한다.
 
 ## 앱 구성과 이후 배포 전략 실습
 

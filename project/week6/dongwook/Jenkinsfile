@@ -24,197 +24,147 @@ pipeline {
     }
 
     stages {
-        // CI: 소스 확인, Python 테스트, 이미지 빌드와 실행 검증
-        stage('CI: Checkout') {
-            steps {
-                checkout scm
-                script {
-                    if (!(params.APP_VERSION ==~ /[A-Za-z0-9][A-Za-z0-9_.-]{0,39}/)) {
-                        error('APP_VERSION은 영문/숫자로 시작하는 1~40자의 영문, 숫자, _, ., - 값이어야 합니다.')
-                    }
-                    env.APP_VERSION = params.APP_VERSION
-                    env.GIT_REVISION = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-                    env.RELEASE_ID = "${params.APP_VERSION}-${env.GIT_REVISION.take(12)}-${env.BUILD_NUMBER}"
-                }
-
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKERHUB_USERNAME',
-                        passwordVariable: 'DOCKERHUB_TOKEN'
-                    )
-                ]) {
-                    script {
-                        if (!(env.DOCKERHUB_USERNAME ==~ /[a-z0-9][a-z0-9_-]*/)) {
-                            error('dockerhub-credentials의 Username에는 Docker Hub ID를 입력하세요.')
+        stage('CI') {
+            stages {
+                // CI: 소스 확인, Python 테스트, 이미지 빌드와 실행 검증
+                stage('Checkout') {
+                    steps {
+                        checkout scm
+                        script {
+                            if (!(params.APP_VERSION ==~ /[A-Za-z0-9][A-Za-z0-9_.-]{0,39}/)) {
+                                error('APP_VERSION은 영문/숫자로 시작하는 1~40자의 영문, 숫자, _, ., - 값이어야 합니다.')
+                            }
+                            env.APP_VERSION = params.APP_VERSION
+                            env.GIT_REVISION = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                            env.RELEASE_ID = "${params.APP_VERSION}-${env.GIT_REVISION.take(12)}-${env.BUILD_NUMBER}"
                         }
-                        env.IMAGE_REPOSITORY = "${env.DOCKERHUB_USERNAME}/${env.DOCKERHUB_REPOSITORY}"
-                        env.IMAGE_TAG = "${env.IMAGE_REPOSITORY}:${env.RELEASE_ID}"
+
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'dockerhub-credentials',
+                                usernameVariable: 'DOCKERHUB_USERNAME',
+                                passwordVariable: 'DOCKERHUB_TOKEN'
+                            )
+                        ]) {
+                            script {
+                                if (!(env.DOCKERHUB_USERNAME ==~ /[a-z0-9][a-z0-9_-]*/)) {
+                                    error('dockerhub-credentials의 Username에는 Docker Hub ID를 입력하세요.')
+                                }
+                                env.IMAGE_REPOSITORY = "${env.DOCKERHUB_USERNAME}/${env.DOCKERHUB_REPOSITORY}"
+                                env.IMAGE_TAG = "${env.IMAGE_REPOSITORY}:${env.RELEASE_ID}"
+                            }
+                        }
+                    }
+                }
+
+                stage('Python Test') {
+                    steps {
+                        dir(env.PROJECT_DIR) {
+                            sh '''
+                                set -eu
+                                python3 -m venv .venv
+                                .venv/bin/python -m pip install --disable-pip-version-check \
+                                    -r app/requirements.txt
+                                (cd app && ../.venv/bin/python -m unittest discover -s tests -v)
+                            '''
+                        }
+                    }
+                }
+
+                stage('Build Image') {
+                    steps {
+                        dir(env.PROJECT_DIR) {
+                            sh '''
+                                docker build \
+                                    --build-arg "APP_VERSION=$APP_VERSION" \
+                                    --build-arg "RELEASE_ID=$RELEASE_ID" \
+                                    --build-arg "GIT_REVISION=$GIT_REVISION" \
+                                    -t "$IMAGE_TAG" app
+                            '''
+                        }
+                    }
+                }
+
+                stage('Test Image') {
+                    steps {
+                        dir(env.PROJECT_DIR) {
+                            // 실제 배포할 이미지를 실행하고, 호스트 포트 없이 HTTP 응답을 검사한다.
+                            sh 'sh scripts/test-image.sh'
+                        }
                     }
                 }
             }
         }
 
-        stage('CI: Python Test') {
-            steps {
-                dir(env.PROJECT_DIR) {
-                    sh '''
-                        set -eu
-                        python3 -m venv .venv
-                        .venv/bin/python -m pip install --disable-pip-version-check \
-                            -r app/requirements.txt
-                        (cd app && ../.venv/bin/python -m unittest discover -s tests -v)
-                    '''
-                }
-            }
-        }
-
-        stage('CI: Build Image') {
-            steps {
-                dir(env.PROJECT_DIR) {
-                    sh '''
-                        docker build \
-                            --build-arg "APP_VERSION=$APP_VERSION" \
-                            --build-arg "RELEASE_ID=$RELEASE_ID" \
-                            --build-arg "GIT_REVISION=$GIT_REVISION" \
-                            -t "$IMAGE_TAG" app
-                    '''
-                }
-            }
-        }
-
-        stage('CI: Test Image') {
-            steps {
-                dir(env.PROJECT_DIR) {
-                    // 실제 배포할 이미지를 실행하고, 호스트 포트 없이 HTTP 응답을 검사한다.
-                    sh '''
-                        set -eu
-                        mkdir -p .artifacts
-                        docker run -d --label owner=dongwook "$IMAGE_TAG" \
-                            > .artifacts/test-container
-                        container_id=$(cat .artifacts/test-container)
-                        trap 'docker rm -f "$container_id" >/dev/null' EXIT
-
-                        # 앱 시작 전의 연결 거부는 예상되는 상태이므로 조용히 재시도한다.
-                        set +x
-                        ready=0
-                        for attempt in $(seq 1 20); do
-                            if docker exec "$container_id" python -c '
-import urllib.request
-urllib.request.urlopen("http://127.0.0.1:8080/health", timeout=2)
-' >/dev/null 2>&1; then
-                                ready=1
-                                break
-                            fi
-                            sleep 1
-                        done
-
-                        if [ "$ready" -ne 1 ]; then
-                            echo 'Application did not become ready within 20 attempts' >&2
-                            docker logs "$container_id" >&2
-                            exit 1
-                        fi
-
-                        set -x
-                        docker exec "$container_id" python -c '
-import json, os, urllib.request
-for path in ("/health", "/version"):
-    with urllib.request.urlopen("http://127.0.0.1:8080" + path, timeout=2) as response:
-        body = json.load(response)
-    assert body["version"] == os.environ["APP_VERSION"]
-    assert body["release"] == os.environ["RELEASE_ID"]
-    assert body["revision"] == os.environ["GIT_REVISION"]
-    if path == "/health":
-        assert body["status"] == "ok"
-'
-                        echo 'Image HTTP checks passed'
-                    '''
-                }
-            }
-        }
-
-        // CD: 검증한 이미지를 게시하고 App 서버와 Nginx에 배포한 뒤 응답 확인
-        stage('CD: Push Image') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKERHUB_USERNAME',
-                        passwordVariable: 'DOCKERHUB_TOKEN'
-                    )
-                ]) {
-                    dir(env.PROJECT_DIR) {
-                        sh '''
-                            set -eu
-                            set +x
-                            umask 077
-                            export DOCKER_CONFIG="$PWD/.artifacts/docker-config"
-                            mkdir -p "$DOCKER_CONFIG"
-                            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-                            printf '%s' "$DOCKERHUB_TOKEN" | docker login \
-                                --username "$DOCKERHUB_USERNAME" --password-stdin
-                            docker push "$IMAGE_TAG"
-                            docker image inspect "$IMAGE_TAG" \
-                                > .artifacts/image-inspect.json
-                            python3 - <<'PY'
-import json, os, re
-from pathlib import Path
-
-image = json.loads(Path(".artifacts/image-inspect.json").read_text())[0]
-repository = os.environ["IMAGE_REPOSITORY"]
-image_ref = next(ref for ref in image["RepoDigests"] if ref.startswith(repository + "@sha256:"))
-if not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", image_ref):
-    raise ValueError("Invalid image digest")
-Path(".artifacts/deploy-vars.json").write_text(json.dumps({
-    "image_repository": repository,
-    "image_ref": image_ref,
-    "app_version": os.environ["APP_VERSION"],
-    "release_id": os.environ["RELEASE_ID"],
-    "git_revision": os.environ["GIT_REVISION"],
-}, indent=2))
-print("Deploy image:", image_ref)
-PY
-                        '''
+        stage('CD') {
+            stages {
+                // CD: 검증한 이미지를 게시하고 App 서버와 Nginx에 배포한 뒤 응답 확인
+                stage('Push Image') {
+                    steps {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'dockerhub-credentials',
+                                usernameVariable: 'DOCKERHUB_USERNAME',
+                                passwordVariable: 'DOCKERHUB_TOKEN'
+                            )
+                        ]) {
+                            dir(env.PROJECT_DIR) {
+                                sh '''
+                                    set -eu
+                                    set +x
+                                    umask 077
+                                    export DOCKER_CONFIG="$PWD/.artifacts/docker-config"
+                                    mkdir -p "$DOCKER_CONFIG"
+                                    trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+                                    printf '%s' "$DOCKERHUB_TOKEN" | docker login \
+                                        --username "$DOCKERHUB_USERNAME" --password-stdin
+                                    docker push "$IMAGE_TAG"
+                                    docker image inspect "$IMAGE_TAG" \
+                                        > .artifacts/image-inspect.json
+                                    python3 scripts/write-deploy-vars.py
+                                '''
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        stage('CD: Deploy App + Nginx') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKERHUB_USERNAME',
-                        passwordVariable: 'DOCKERHUB_TOKEN'
-                    )
-                ]) {
-                    dir(env.PROJECT_DIR) {
-                        sh '''
-                            set -eu
-                            export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
-                            # Agent 실행 계정의 SSH 키, SSH 설정, known_hosts를 사용한다.
-                            ansible-inventory -i ansible/inventory/hosts.yml --graph
-                            ansible-playbook -i ansible/inventory/hosts.yml \
-                                ansible/playbooks/deploy.yml --list-hosts
-                            ansible-playbook -i ansible/inventory/hosts.yml \
-                                ansible/playbooks/deploy.yml \
-                                --extra-vars @.artifacts/deploy-vars.json
-                        '''
+                stage('Deploy App + Nginx') {
+                    steps {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'dockerhub-credentials',
+                                usernameVariable: 'DOCKERHUB_USERNAME',
+                                passwordVariable: 'DOCKERHUB_TOKEN'
+                            )
+                        ]) {
+                            dir(env.PROJECT_DIR) {
+                                sh '''
+                                    set -eu
+                                    export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
+                                    # Agent 실행 계정의 SSH 키, SSH 설정, known_hosts를 사용한다.
+                                    ansible-inventory -i ansible/inventory/hosts.yml --graph
+                                    ansible-playbook -i ansible/inventory/hosts.yml \
+                                        ansible/playbooks/deploy.yml --list-hosts
+                                    ansible-playbook -i ansible/inventory/hosts.yml \
+                                        ansible/playbooks/deploy.yml \
+                                        --extra-vars @.artifacts/deploy-vars.json
+                                '''
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        stage('CD: Verify') {
-            steps {
-                dir(env.PROJECT_DIR) {
-                    sh '''
-                        # Agent가 접근 가능한 Nginx 주소를 통해 배포 결과를 확인한다.
-                        python3 scripts/verify.py \
-                            --version "$APP_VERSION" \
-                            --release "$RELEASE_ID"
-                    '''
+                stage('Verify') {
+                    steps {
+                        dir(env.PROJECT_DIR) {
+                            sh '''
+                                # Agent가 접근 가능한 Nginx 주소를 통해 배포 결과를 확인한다.
+                                python3 scripts/verify.py \
+                                    --version "$APP_VERSION" \
+                                    --release "$RELEASE_ID"
+                            '''
+                        }
+                    }
                 }
             }
         }
