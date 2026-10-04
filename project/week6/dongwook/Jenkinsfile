@@ -210,6 +210,7 @@ PY
             steps {
                 dir(env.PROJECT_DIR) {
                     sh '''
+                        # Agent가 접근 가능한 Nginx 주소를 통해 배포 결과를 확인한다.
                         python3 scripts/verify.py \
                             --version "$APP_VERSION" \
                             --release "$RELEASE_ID"

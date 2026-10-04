@@ -1,6 +1,6 @@
 # Week 6 · 김동욱 Jenkins / Ansible 배포 실습
 
-Jenkins Agent에서 FastAPI 이미지를 빌드·테스트하고 Docker Hub에 Push한다. Ansible은 Push한 이미지의 digest를 지정해 App Server 3대에 같은 이미지를 배포한 다음 Nginx 개인 설정을 반영한다. Nginx 및 각 서버의 `/health`, `/version` 응답으로 결과를 확인한다.
+Jenkins Agent에서 FastAPI 이미지를 빌드·테스트하고 Docker Hub에 Push한다. Ansible은 Push한 이미지의 digest를 지정해 App Server 3대에 같은 이미지를 배포한 다음 Nginx 개인 설정을 반영한다. 각 앱 서버는 Ansible이 해당 서버에서 확인하고, Jenkins Agent는 Nginx 경유 `/health`, `/version` 응답을 확인한다.
 
 ## 디렉터리
 
@@ -28,7 +28,7 @@ dongwook/
 │           ├── tasks/main.yml
 │           └── templates/dongwook.conf.j2
 ├── scripts/
-│   └── verify.py                       # App 3대 / Nginx 상태와 release 검증
+│   └── verify.py                       # Agent에서 Nginx 경유 상태와 release 검증
 └── docs/
     ├── setup.md                        # Jenkins / SSH / Nginx 준비
     └── results.md                      # 실습 결과 기록 양식
@@ -60,13 +60,13 @@ dongwook/
 
 ## 실행 흐름
 
-1. 개인 Jenkins Folder, SCM, Docker Hub Credential을 준비한다. Agent에서 App 서버와 Nginx 서버로 SSH 접속할 수 있어야 하며, 두 종류의 서버 모두 배포 계정에 비밀번호 없는 sudo 권한이 필요하다.
+1. 개인 Jenkins Folder, SCM, Docker Hub Credential을 준비한다. Agent에서 Nginx 서버로 HTTP 접속할 수 있어야 하고, Ansible 앱 배포를 위한 App 서버 SSH 경로(예: Nginx 서버를 경유하는 SSH 설정)가 준비되어 있어야 한다. App 서버와 Nginx 서버의 배포 계정에는 비밀번호 없는 sudo 권한이 필요하다.
 2. Jenkins UI의 `dongwook/deploy-pipeline`에서 **Build with Parameters**로 `APP_VERSION`(기본 `v1`)을 입력한다. 첫 실행은 **Build Now**로 기본값을 사용하고 이후 파라미터 메뉴가 표시될 수 있다.
 3. Agent가 GitHub 소스를 체크아웃하고 `<APP_VERSION>-<commit 12자리>-<build 번호>`를 고유한 `RELEASE_ID`이자 이미지 태그로 사용한다.
 4. `CI: Python Test`에서 `test_main.py`를 실행한다. 통과하면 이미지를 한 번 빌드한 뒤 `CI: Test Image`에서 `/health`, `/version` HTTP 응답과 빌드 정보를 검사한다. 테스트 컨테이너는 호스트 포트를 사용하지 않으며 종료 시 삭제한다.
 5. `dockerhub-credentials`의 Username과 액세스 토큰으로 `<Docker Hub ID>/dongwook-app`에 Push한다. Ansible은 같은 Credential로 인증하고 `repository@sha256:...` 형식으로 Pull한다. Private Repository도 지원한다.
 6. 서버별 `dongwook-app` 컨테이너를 순서대로 교체하고 상태와 버전을 검사한다. 세 서버가 모두 성공하면 같은 `deploy.yml`에서 Nginx 템플릿을 `/etc/nginx/conf.d/dongwook.conf`에 배포한다. 설정이 바뀌면 `nginx -t`로 검사한 뒤 Reload한다.
-7. Agent에서 세 App 서버와 Nginx에 직접 요청하여 표시 버전과 고유 `release`가 일치하는지 검증한다.
+7. Ansible이 각 App 서버의 로컬 `/health`, `/version` 응답을 검사한다. `CD: Verify`에서는 Agent가 Nginx에만 요청하여 표시 버전과 고유 `release`를 확인한다.
 8. Jenkins Artifact의 `deploy-vars.json`에 이미지 digest와 빌드 정보를 보관한다. [결과 기록](docs/results.md)에 실행 URL과 응답을 남긴다.
 
 Jenkinsfile은 `CI:`와 `CD:` 접두사가 붙은 개별 Stage로 구분한다. CI는 소스 확인 → Python 테스트 → 이미지 빌드 → 이미지 실행 테스트, CD는 Docker Hub Push → Ansible 배포 → 결과 검증 순서다. 별도 Job이나 중첩 Stage 없이 Jenkins 화면에서 각 단계의 성공·실패를 확인할 수 있다.
@@ -98,7 +98,7 @@ Jenkinsfile은 `CI:`와 `CD:` 접두사가 붙은 개별 Stage로 구분한다. 
 
 버전·release·커밋은 이미지에 포함하고 서버·슬롯은 컨테이너 실행 시 주입하므로 동일 이미지를 다른 서버나 슬롯에서 재사용할 수 있다. 실제 배포 대상은 태그를 다시 해석하지 않고 Push한 digest로 고정한다.
 
-이후 롤링 실습에서는 서버별 `release` 변경 순서, 카나리 실습에서는 Nginx 응답의 버전별 비율, 블루그린 실습에서는 `slot`과 `release` 전환을 관찰할 수 있다. 이번 변경에는 트래픽 가중치 조절, blue/green 동시 실행, 전환 및 롤백 자동화를 추가하지 않는다. 기존 `serial: 1` 순차 교체만 유지하고 추가 포트 `21003`은 예약한다. 현재 `Verify`는 모든 서버가 같은 release여야 통과하므로 향후 카나리 중간 단계 검증은 별도로 확장해야 한다.
+이후 롤링 실습에서는 서버별 `release` 변경 순서, 카나리 실습에서는 Nginx 응답의 버전별 비율, 블루그린 실습에서는 `slot`과 `release` 전환을 관찰할 수 있다. 이번 변경에는 트래픽 가중치 조절, blue/green 동시 실행, 전환 및 롤백 자동화를 추가하지 않는다. 기존 `serial: 1` 순차 교체만 유지하고 추가 포트 `21003`은 예약한다. 현재 Ansible의 서버별 검증과 Nginx 경유 `Verify`는 배포한 release를 기대하므로 향후 카나리 중간 단계 검증은 별도로 확장해야 한다.
 
 ## 로컬 실행 및 확인
 
