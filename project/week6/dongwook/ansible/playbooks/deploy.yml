@@ -8,3 +8,12 @@
   any_errors_fatal: true
   roles:
     - app
+
+- name: Deploy Dongwook's Nginx configuration after the app servers
+  hosts: load_balancers
+  become: true
+  become_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - nginx

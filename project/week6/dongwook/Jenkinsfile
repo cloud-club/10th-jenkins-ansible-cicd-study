@@ -133,7 +133,7 @@ for path in ("/health", "/version"):
             }
         }
 
-        // CD: 검증한 이미지를 게시하고 세 서버에 배포한 뒤 응답 확인
+        // CD: 검증한 이미지를 게시하고 App 서버와 Nginx에 배포한 뒤 응답 확인
         stage('CD: Push Image') {
             steps {
                 withCredentials([
@@ -180,7 +180,7 @@ PY
             }
         }
 
-        stage('CD: Deploy') {
+        stage('CD: Deploy App + Nginx') {
             steps {
                 withCredentials([
                     usernamePassword(

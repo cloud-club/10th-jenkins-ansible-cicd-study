@@ -1,6 +1,6 @@
 # Week 6 · 김동욱 Jenkins / Ansible 배포 실습
 
-Jenkins Agent에서 FastAPI 이미지를 빌드·테스트하고 Docker Hub에 Push한다. Ansible은 Push한 이미지의 digest를 지정해 App Server 3대에 같은 이미지를 배포한다. Nginx 및 각 서버의 `/health`, `/version` 응답으로 결과를 확인한다.
+Jenkins Agent에서 FastAPI 이미지를 빌드·테스트하고 Docker Hub에 Push한다. Ansible은 Push한 이미지의 digest를 지정해 App Server 3대에 같은 이미지를 배포한 다음 Nginx 개인 설정을 반영한다. Nginx 및 각 서버의 `/health`, `/version` 응답으로 결과를 확인한다.
 
 ## 디렉터리
 
@@ -21,8 +21,7 @@ dongwook/
 │   │   ├── hosts.yml                   # App Server 3대 + Nginx
 │   │   └── group_vars/all.yml          # 개인 이름, 포트, 컨테이너 변수
 │   ├── playbooks/
-│   │   ├── deploy.yml                  # App Server 순차 배포
-│   │   └── render-nginx.yml            # Nginx 개인 설정을 로컬에 생성
+│   │   └── deploy.yml                  # App Server 순차 배포 후 Nginx 설정 반영
 │   └── roles/
 │       ├── app/tasks/main.yml
 │       └── nginx/
@@ -61,12 +60,12 @@ dongwook/
 
 ## 실행 흐름
 
-1. [환경 준비](docs/setup.md)에 따라 개인 Jenkins Folder, SCM, Credentials 및 Nginx 라우팅을 준비한다.
+1. 개인 Jenkins Folder, SCM, Docker Hub Credential을 준비한다. Agent에서 App 서버와 Nginx 서버로 SSH 접속할 수 있어야 하며, 두 종류의 서버 모두 배포 계정에 비밀번호 없는 sudo 권한이 필요하다.
 2. Jenkins UI의 `dongwook/deploy-pipeline`에서 **Build with Parameters**로 `APP_VERSION`(기본 `v1`)을 입력한다. 첫 실행은 **Build Now**로 기본값을 사용하고 이후 파라미터 메뉴가 표시될 수 있다.
 3. Agent가 GitHub 소스를 체크아웃하고 `<APP_VERSION>-<commit 12자리>-<build 번호>`를 고유한 `RELEASE_ID`이자 이미지 태그로 사용한다.
 4. `CI: Python Test`에서 `test_main.py`를 실행한다. 통과하면 이미지를 한 번 빌드한 뒤 `CI: Test Image`에서 `/health`, `/version` HTTP 응답과 빌드 정보를 검사한다. 테스트 컨테이너는 호스트 포트를 사용하지 않으며 종료 시 삭제한다.
 5. `dockerhub-credentials`의 Username과 액세스 토큰으로 `<Docker Hub ID>/dongwook-app`에 Push한다. Ansible은 같은 Credential로 인증하고 `repository@sha256:...` 형식으로 Pull한다. Private Repository도 지원한다.
-6. 서버별 `dongwook-app` 컨테이너를 순서대로 교체하고 상태와 버전을 검사한다. 실패하면 후속 서버 배포를 중단한다.
+6. 서버별 `dongwook-app` 컨테이너를 순서대로 교체하고 상태와 버전을 검사한다. 세 서버가 모두 성공하면 같은 `deploy.yml`에서 Nginx 템플릿을 `/etc/nginx/conf.d/dongwook.conf`에 배포한다. 설정이 바뀌면 `nginx -t`로 검사한 뒤 Reload한다.
 7. Agent에서 세 App 서버와 Nginx에 직접 요청하여 표시 버전과 고유 `release`가 일치하는지 검증한다.
 8. Jenkins Artifact의 `deploy-vars.json`에 이미지 digest와 빌드 정보를 보관한다. [결과 기록](docs/results.md)에 실행 URL과 응답을 남긴다.
 
@@ -125,14 +124,16 @@ curl --fail http://1.201.116.156:18003/version
 python3 scripts/verify.py --version v1 --release '<Jenkins에서 배포한 RELEASE_ID>'
 ```
 
+`--list-hosts` 출력에 App 서버 3대와 Nginx 서버 1대가 모두 표시되어야 한다.
+
 ## 공유 환경 운영 범위
 
 - 자신의 Folder, Workspace, `dongwook-` 리소스와 할당 포트만 사용한다. Controller와 Agent에는 Playbook을 배포하지 않는다.
 - 시스템 패키지 설치, Docker 재시작, 서버 재부팅 및 다른 사용자 리소스 변경은 자동화에 포함하지 않는다.
 - SSH는 Agent 실행 계정에 준비한 키와 `~/.ssh/known_hosts`를 사용한다. 대상 서버의 `authorized_keys`에 해당 공개키를 등록하고 호스트 키 확인을 유지한다. SSH 키와 `known_hosts`용 Jenkins Credential은 별도로 사용하지 않는다.
-- App 서버에서는 SSH 접속 후 `become`으로 root 권한을 사용해 배포한다. 현재 Pipeline은 sudo 비밀번호를 주입하지 않으므로 접속 계정에 비밀번호 없는 sudo 권한이 필요하다.
+- App 서버와 Nginx 서버에서는 SSH 접속 후 `become`으로 root 권한을 사용한다. 현재 Pipeline은 sudo 비밀번호를 주입하지 않으므로 접속 계정에 비밀번호 없는 sudo 권한이 필요하다. Nginx 서버에는 Nginx 서비스가 준비되어 있어야 한다.
 - Docker Hub 토큰은 `--password-stdin`으로 전달한다. Agent Workspace와 원격 서버에 각각 전용 임시 Docker 설정을 만들고 작업 후 정리한다. 공통 `~/.docker/config.json`을 수정하거나 인증 파일을 Artifact로 보관하지 않는다.
-- Nginx 설정은 로컬에서 생성한다. 실제 반영은 사전 공유한 작업 시간에 공통 잠금 절차로 수행한다.
+- Nginx 배포는 개인 파일 `/etc/nginx/conf.d/dongwook.conf`만 교체하며, 변경이 없으면 Reload하지 않는다.
 - 이 예제는 컨테이너 교체 방식이며 무중단 전환이나 자동 롤백을 구현하지 않는다. 실패하면 일부 서버에 이전 버전이 남을 수 있으므로 응답을 확인한 뒤 원인을 수정하고 재배포한다.
 - Docker Hub 이미지와 원격 서버의 이미지는 수동 롤백 판단을 위해 남긴다. 실습 종료 시 자신의 컨테이너와 사용하지 않는 정확한 이미지 digest만 정리한다. `docker system prune`, 전체 컨테이너 삭제 명령은 사용하지 않는다.
 
@@ -149,4 +150,4 @@ docker image ls --digests '<Docker Hub ID>/dongwook-app'
 docker image rm '<Docker Hub ID>/dongwook-app@sha256:<정리할 digest>'
 ```
 
-Nginx 개인 설정 제거도 최초 설치와 동일하게 사전 공유, 공통 잠금, `nginx -t`, Reload 순서로 진행한다.
+Nginx 개인 설정을 제거할 때는 자신의 `/etc/nginx/conf.d/dongwook.conf`만 삭제하고 `nginx -t` 후 Reload한다.
