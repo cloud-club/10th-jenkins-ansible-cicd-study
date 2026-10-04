@@ -19,7 +19,7 @@ pipeline {
     }
 
     environment {
-        PROJECT_DIR = 'project/week6/dongwook'
+        PROJECT_DIR = 'practice/dongwook'
         DOCKERHUB_REPOSITORY = 'dongwook-app'
     }
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run from project/week6/dongwook with IMAGE_TAG set.
+# Run from practice/dongwook with IMAGE_TAG set.
 set -eu
 mkdir -p .artifacts
 docker run -d --label owner=dongwook "$IMAGE_TAG" \

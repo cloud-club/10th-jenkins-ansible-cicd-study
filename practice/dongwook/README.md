@@ -1,11 +1,11 @@
-# Week 6 · 김동욱 Jenkins / Ansible 배포 실습
+# 김동욱 Jenkins / Ansible 배포 실습
 
 Jenkins Agent에서 FastAPI 이미지를 빌드·테스트하고 Docker Hub에 Push한다. Ansible은 Push한 이미지의 digest를 지정해 App Server 3대에 같은 이미지를 배포한 다음 Nginx 개인 설정을 반영한다. 각 앱 서버는 Ansible이 해당 서버에서 확인하고, Jenkins Agent는 Nginx 경유 `/health`, `/version` 응답을 확인한다.
 
 ## 디렉터리
 
 ```text
-dongwook/
+practice/dongwook/
 ├── README.md
 ├── Jenkinsfile                         # CI: 테스트·빌드 / CD: Push·배포·검증
 ├── .gitignore                          # 키, 환경변수, 임시 산출물 제외
@@ -36,7 +36,9 @@ dongwook/
     └── results.md                      # 실습 결과 기록 양식
 ```
 
-`.artifacts/`는 실행 중 생성되며 Git에 포함하지 않는다. 모든 명령은 별도 안내가 없으면 이 디렉터리에서 실행한다.
+`.artifacts/`는 실행 중 생성되며 Git에 포함하지 않는다. 모든 명령은 별도 안내가 없으면 저장소 루트 기준 `practice/dongwook/` 디렉터리에서 실행한다.
+
+Jenkins Job의 **Pipeline script from SCM → Script Path**는 `practice/dongwook/Jenkinsfile`로 설정한다. 기존 Job도 이 경로로 변경해야 이동한 Jenkinsfile을 읽을 수 있다.
 
 ## 서버와 개인 리소스
 
