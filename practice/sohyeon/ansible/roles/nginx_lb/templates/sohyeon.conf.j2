@@ -1,8 +1,8 @@
-# 개인 수신 포트와 앱 서버 3대의 요청 분산 설정 템플릿
+# 개인 수신 포트와 인벤토리 앱 서버의 요청 분산 설정 템플릿
 upstream sohyeon_backend {
-    server 1.201.118.202:20007;
-    server 1.201.118.10:20007;
-    server 1.201.118.90:20007;
+{% for host in groups['app_servers'] %}
+    server {{ hostvars[host]['ansible_host'] }}:20007;
+{% endfor %}
 }
 
 server {
