@@ -1,0 +1,47 @@
+pipeline {
+    agent none
+
+    parameters {
+        string(
+            name: 'AGENT_LABEL',
+            defaultValue: '',
+            description: 'Jenkins label assigned to the VM 2 Ansible Agent'
+        )
+    }
+
+    stages {
+        stage('Ansible Ping') {
+            steps {
+                script {
+                    def agentLabel = params.AGENT_LABEL?.trim()
+                    if (!agentLabel) {
+                        error('Set AGENT_LABEL to the label of the VM 2 Jenkins Agent.')
+                    }
+
+                    node(agentLabel) {
+                        checkout scm
+
+                        dir('study/week6/taehyeon/jenkins-deploy-lab/ansible') {
+                            withCredentials([
+                                sshUserPrivateKey(
+                                    credentialsId: 'taehyeon-appserver-ssh',
+                                    keyFileVariable: 'SSH_KEY_FILE',
+                                    usernameVariable: 'SSH_USER'
+                                )
+                            ]) {
+                                sh '''#!/bin/sh
+                                    set -eu
+                                    ansible-playbook \\
+                                        -i inventory/hosts.ini \\
+                                        playbooks/ping.yml \\
+                                        --private-key "$SSH_KEY_FILE" \\
+                                        -e "ansible_user=$SSH_USER"
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
