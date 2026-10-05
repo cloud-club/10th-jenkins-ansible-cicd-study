@@ -1,3 +1,4 @@
+
 ---
 - name: Check connectivity to application servers
   hosts: app_servers

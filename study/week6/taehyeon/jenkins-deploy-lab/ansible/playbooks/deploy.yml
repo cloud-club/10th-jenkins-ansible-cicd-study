@@ -1,0 +1,91 @@
+---
+- name: Deploy Spring Boot application to all App Servers
+  hosts: app_servers
+  gather_facts: false
+  become: false
+
+  vars:
+    app_host_port: 20001 # 고태현에게 할당된 App Server 포트
+    app_container_port: 8080 # Spring Boot 컨테이너 내부 포트
+    app_container_name: "{{ app_name }}"
+    image_tar_remote: "/tmp/{{ app_name }}-{{ image_tag }}.tar"
+
+  tasks:
+    - name: Copy Docker image archive from Jenkins Agent
+      ansible.builtin.copy:
+        src: "{{ image_tar }}"
+        dest: "{{ image_tar_remote }}"
+        mode: "0644"
+      # Agent에서 빌드한 이미지를 각 App Server로 전달
+
+    - name: Load Docker image on App Server
+      ansible.builtin.command:
+        argv:
+          - docker
+          - load
+          - -i
+          - "{{ image_tar_remote }}"
+      changed_when: true
+      # 전달받은 tar 파일을 Docker 이미지로 등록
+
+    - name: Check for an existing application container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - container
+          - inspect
+          - "{{ app_container_name }}"
+      register: existing_container
+      changed_when: false
+      failed_when: false
+      # 기존 컨테이너가 있는지 확인
+
+    - name: Remove the existing application container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - container
+          - rm
+          - --force
+          - "{{ app_container_name }}"
+      when: existing_container.rc == 0
+      # 같은 이름의 컨테이너가 있으면 교체
+
+    - name: Start the new application container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name
+          - "{{ app_container_name }}"
+          - --restart
+          - unless-stopped
+          - --publish
+          - "{{ app_host_port }}:{{ app_container_port }}"
+          - --env
+          - "APP_VERSION={{ image_tag }}"
+          - --env
+          - "APP_INSTANCE={{ inventory_hostname }}"
+          - "{{ app_name }}:{{ image_tag }}"
+      # 새 버전 컨테이너를 실행하고 서버별 인스턴스 이름 전달
+
+    - name: Wait until the application health endpoint is ready
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_host_port }}/health"
+        method: GET
+        status_code: 200
+        return_content: true
+      register: health_check
+      retries: 10
+      delay: 3
+      until:
+        - health_check.status == 200
+        - health_check.json.status == 'UP'
+      # 배포한 애플리케이션이 정상 응답할 때까지 확인
+
+    - name: Remove the copied Docker image archive
+      ansible.builtin.file:
+        path: "{{ image_tar_remote }}"
+        state: absent
+      # 배포가 확인되면 App Server의 임시 파일 정리

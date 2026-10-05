@@ -1,47 +1,116 @@
 pipeline {
-    agent none
+    agent {
+        label 'ansible-agent' // Jenkins Agent에서 빌드와 배포 실행
+    }
 
-    parameters {
-        string(
-            name: 'AGENT_LABEL',
-            defaultValue: '',
-            description: 'Jenkins label assigned to the VM 2 Ansible Agent'
-        )
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        APP_NAME = 'taehyeon-app' // Docker 이미지와 컨테이너 이름
+        APP_DIR = 'study/week6/taehyeon/jenkins-deploy-lab'
+        IMAGE_TAG = "${BUILD_NUMBER}" // Jenkins 빌드 번호를 이미지 버전으로 사용
+        NGINX_HOST = '1.201.116.156' // 공용 Nginx Load Balancer
+        NGINX_PORT = '18001' // 고태현에게 할당된 Nginx 포트
     }
 
     stages {
-        stage('Ansible Ping') {
+        stage('Checkout') {
             steps {
-                script {
-                    def agentLabel = params.AGENT_LABEL?.trim()
-                    if (!agentLabel) {
-                        error('Set AGENT_LABEL to the label of the VM 2 Jenkins Agent.')
-                    }
+                checkout scm // Git 저장소에서 소스 코드 가져오기
+            }
+        }
 
-                    node(agentLabel) {
-                        checkout scm
+        stage('Test') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        chmod +x gradlew
+                        ./gradlew test
+                    ''' // 애플리케이션 테스트 실행
+                }
+            }
+        }
 
-                        dir('study/week6/taehyeon/jenkins-deploy-lab/ansible') {
-                            withCredentials([
-                                sshUserPrivateKey(
-                                    credentialsId: 'taehyeon-appserver-ssh',
-                                    keyFileVariable: 'SSH_KEY_FILE',
-                                    usernameVariable: 'SSH_USER'
-                                )
-                            ]) {
-                                sh '''#!/bin/sh
-                                    set -eu
-                                    ansible-playbook \\
-                                        -i inventory/hosts.ini \\
-                                        playbooks/ping.yml \\
-                                        --private-key "$SSH_KEY_FILE" \\
-                                        -e "ansible_user=$SSH_USER"
-                                '''
-                            }
-                        }
+        stage('Build') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh './gradlew bootJar' // 실행 가능한 Spring Boot JAR 생성
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        docker build \\
+                          -t ${APP_NAME}:${IMAGE_TAG} \\
+                          .
+                    ''' // Agent에서 배포용 Docker 이미지 빌드
+                }
+            }
+        }
+
+        stage('Docker Save') {
+            steps {
+                sh '''
+                    docker save \\
+                      ${APP_NAME}:${IMAGE_TAG} \\
+                      -o ${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar
+                ''' // Ansible이 App Server로 전달할 이미지 파일 생성
+            }
+        }
+
+        stage('Ansible Syntax Check') {
+            steps {
+                dir("${APP_DIR}/ansible") {
+                    sh '''
+                        ansible-playbook \\
+                          -i inventory/hosts.ini \\
+                          playbooks/deploy.yml \\
+                          --syntax-check
+                    ''' // 서버에 접속하지 않고 Inventory와 Playbook 문법 확인
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                sshagent(credentials: ['taehyeon-appserver-ssh']) {
+                    dir("${APP_DIR}/ansible") {
+                        sh '''
+                            ansible-playbook \\
+                              -i inventory/hosts.ini \\
+                              playbooks/deploy.yml \\
+                              -e app_name=${APP_NAME} \\
+                              -e image_tag=${IMAGE_TAG} \\
+                              -e image_tar=${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar
+                        ''' // SSH Credential로 App Server 세 대에 배포
                     }
                 }
             }
+        }
+
+        stage('Verify via Nginx') {
+            steps {
+                sh '''
+                    curl --fail --retry 10 --retry-delay 2 --retry-connrefused \\
+                      http://${NGINX_HOST}:${NGINX_PORT}/health
+                    curl --fail --retry 10 --retry-delay 2 --retry-connrefused \\
+                      http://${NGINX_HOST}:${NGINX_PORT}/version
+                ''' // Nginx를 거쳐 배포 상태와 버전 확인
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                rm -f ${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar || true
+            ''' // 성공 여부와 관계없이 임시 이미지 파일 정리
         }
     }
 }
