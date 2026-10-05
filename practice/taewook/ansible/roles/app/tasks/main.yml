@@ -1,0 +1,82 @@
+---
+- name: Check ownership before replacing a container
+  community.docker.docker_container_info:
+    name: "{{ app_container }}"
+  register: existing
+
+- name: Refuse to touch a container without our ownership label
+  ansible.builtin.assert:
+    that:
+      - not existing.exists or (existing.container.Config.Labels | default({}, true)).get('owner', '') == owner
+      - image_ref is match('^taewook-app:')
+
+- name: Create personal staging directory
+  ansible.builtin.file:
+    path: "{{ app_stage }}"
+    state: directory
+    mode: '0750'
+
+- name: Transfer the tested image
+  block:
+    - name: Copy image archive
+      ansible.builtin.copy:
+        src: "{{ image_archive }}"
+        dest: "{{ app_stage }}/image.tar.gz"
+        mode: '0600'
+    - name: Load image
+      community.docker.docker_image_load:
+        path: "{{ app_stage }}/image.tar.gz"
+  always:
+    - name: Remove only our transferred archive
+      ansible.builtin.file:
+        path: "{{ app_stage }}/image.tar.gz"
+        state: absent
+
+- name: Confirm the loaded image is the exact tested image
+  community.docker.docker_image_info:
+    name: "{{ image_ref }}"
+  register: loaded
+
+- name: Compare image ID
+  ansible.builtin.assert:
+    that:
+      - loaded.images | length == 1
+      - loaded.images[0].Id == image_id
+
+- name: Run personal container on allocated port
+  community.docker.docker_container:
+    name: "{{ app_container }}"
+    image: "{{ image_ref }}"
+    state: started
+    restart_policy: unless-stopped
+    published_ports:
+      - "{{ app_port }}:8080"
+    env:
+      INSTANCE: "{{ inventory_hostname }}"
+    labels:
+      owner: "{{ owner }}"
+
+- name: Wait for healthy HTTP response
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/health"
+    return_content: true
+    timeout: 3
+  register: health
+  until: health.status == 200 and (health.json | default({})).get('status') == 'ok'
+  retries: 15
+  delay: 2
+
+- name: Read deployed version
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/version"
+    return_content: true
+    timeout: 3
+  register: version
+
+- name: Verify release identity on each server
+  ansible.builtin.assert:
+    that:
+      - version.json.version == app_version
+      - version.json.git_sha == git_sha
+      - version.json.release == release_id
+      - version.json.instance == inventory_hostname
