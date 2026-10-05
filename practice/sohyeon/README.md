@@ -2,7 +2,7 @@
 
 Jenkins와 Ansible을 사용해 Docker 이미지의 빌드, 테스트, 서버 배포, 배포 후 검증을 자동화하는 실습 프로젝트입니다.
 
-Nginx 기반의 작은 앱을 서버 3대에 배포하고, 로드밸런서의 단일 주소로 요청을 전달합니다. 파일별 역할과 전체 실행 흐름은 [Week 1 상세 문서](Prj-week1.md)에 정리했습니다.
+Nginx 기반의 작은 앱을 서버 3대에 배포하고, 로드밸런서의 단일 주소로 요청을 전달합니다. 파일별 역할과 전체 실행 흐름은 [Week 1 상세 문서](docs/Week1.md)에 정리했습니다.
 
 ## 주요 기능
 
@@ -39,9 +39,11 @@ Nginx 기반의 작은 앱을 서버 3대에 배포하고, 로드밸런서의 �
 │   └── default.conf.template # 앱 응답 및 버전 설정
 ├── ansible/
 │   ├── inventory.ini         # 앱 서버·로드밸런서 목록
-│   ├── deploy.yml            # 앱 배포
-│   ├── nginx.yml             # 로드밸런서 설정
-│   ├── verify.yml            # 배포 후 경유 검사
+│   ├── playbook/
+│   │   ├── prepare_ssh.yml   # inventory 기반 SSH 호스트 키 준비
+│   │   ├── deploy.yml        # 앱 배포
+│   │   ├── nginx.yml         # 로드밸런서 설정
+│   │   └── verify.yml        # 배포 후 경유 검사
 │   └── roles/
 │       ├── app/              # 배포 변수와 컨테이너 교체 작업
 │       └── nginx_lb/         # Nginx 설정 템플릿·task·handler
@@ -92,9 +94,9 @@ docker rm -f sohyeon-cicd-local
 
 ### 실행 순서
 
-1. [inventory.ini](ansible/inventory.ini)의 서버 주소를 확인합니다. 현재 주소는 Jenkinsfile의 `Prepare SSH`와 [Nginx 템플릿](ansible/roles/nginx_lb/templates/sohyeon.conf.j2)에도 작성돼 있으므로 환경 변경 시 함께 수정합니다.
+1. [inventory.ini](ansible/inventory.ini)의 서버 주소를 확인합니다. [SSH 준비 플레이북](ansible/playbook/prepare_ssh.yml)과 [Nginx 템플릿](ansible/roles/nginx_lb/templates/sohyeon.conf.j2)이 이 목록을 참조하므로 서버 IP·대수 변경은 인벤토리에서 관리합니다.
 2. 저장소의 `Jenkinsfile`을 사용하는 Pipeline을 구성합니다. `PROJECT_DIR`은 현재 `${WORKSPACE}/practice/sohyeon` 구조를 전제로 하므로 checkout 위치에 맞춥니다.
-3. 최초 Nginx 설정 또는 설정 변경 시 `CONFIGURE_NGINX=true`로 빌드합니다. 설정이 준비된 이후 앱만 배포할 때는 기본값 `false`를 사용합니다.
+3. 최초 Nginx 설정 또는 앱 서버 IP·대수·포트 등 Nginx 설정 변경 시 `CONFIGURE_NGINX=true`로 빌드합니다. 설정이 준비된 이후 앱만 배포할 때는 기본값 `false`를 사용합니다.
 4. 파이프라인 결과와 배포된 앱의 응답을 확인합니다.
 
 ```text
@@ -119,4 +121,19 @@ curl http://1.201.116.156:18007/version
 
 ## 상세 문서
 
-- [Week1: 파일별 역할, role의 task 순서, URL·포트 연결, Jenkins stage 설명](docs/Week1.md)
+- [Week 1: 파일별 역할, role의 task 순서, URL·포트 연결, Jenkins stage 설명](docs/Week1.md)
+
+## Ansible 실행 구조
+
+Jenkins가 `ansible/playbook/`의 플레이북을 각 stage에서 직접 실행합니다. 전체 순서는 Jenkinsfile에서 관리하므로 `release.yml`은 사용하지 않습니다.
+
+| Jenkins stage | 플레이북 | 실행 위치·역할 |
+| --- | --- | --- |
+| Prepare SSH | [prepare_ssh.yml](ansible/playbook/prepare_ssh.yml) | agent에서 인벤토리의 앱 서버·로드밸런서 호스트 키를 수집해 `.ssh/known_hosts` 생성 |
+| Deploy | [deploy.yml](ansible/playbook/deploy.yml) | 앱 서버에서 `app` role 실행 |
+| Configure Nginx | [nginx.yml](ansible/playbook/nginx.yml) | `CONFIGURE_NGINX=true`일 때 로드밸런서에 설정 적용 |
+| Verify | [verify.yml](ansible/playbook/verify.yml) | 로드밸런서에서 상태·버전 검사 |
+
+배포와 Nginx 플레이북은 `{{ playbook_dir }}/../roles/` 아래의 role을 명시적으로 참조합니다. SSH 준비 결과는 후속 stage의 `ANSIBLE_SSH_ARGS`에서 사용하며, 임시 `.ssh`와 `.artifacts`는 Jenkins의 `post / always`에서 정리합니다.
+
+Nginx의 upstream 주소는 인벤토리에서 생성하지만 앱 포트 `20007`과 수신 포트 `18007`은 템플릿에 지정돼 있습니다. 인벤토리를 수정한 뒤 실제 Nginx에 반영하려면 `CONFIGURE_NGINX=true`로 실행해야 합니다. 자세한 설명은 [Week 1 상세 문서](docs/Week1.md)의 8-6절과 9절에 정리했습니다.

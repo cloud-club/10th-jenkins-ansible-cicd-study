@@ -1,4 +1,4 @@
-# Week1 — Jenkins와 Ansible 배포 흐름
+# Prj-week1 — Jenkins와 Ansible 배포 흐름
 
 이 문서는 현재 저장소의 코드를 기준으로, 작은 앱을 만드는 단계부터 Jenkins가 빌드·배포·검증하는 단계까지 설명한다. 예시의 Jenkins 빌드 번호는 `42`이며, 이미지 태그는 `42`, 앱의 버전 응답은 `v42`로 표기한다.
 
@@ -8,14 +8,14 @@
 | 2 | 앱을 같은 환경에서 실행할 이미지 | `Dockerfile` |
 | 3 | 배포 대상 목록 | `ansible/inventory.ini` |
 | 4 | 반복할 서버 배포 작업 | `ansible/roles/app/defaults/main.yml`, `ansible/roles/app/tasks/main.yml` |
-| 5 | 대상 그룹과 배포 작업 연결 | `ansible/deploy.yml` |
-| 6 | 사용자에게 제공할 단일 접속 주소 | `ansible/roles/nginx_lb/`, `ansible/nginx.yml` |
-| 7 | 배포 후 경유 검사 | `ansible/verify.yml` |
-| 8 | 전체 과정을 순서대로 자동 실행 | `Jenkinsfile` |
+| 5 | 대상 그룹과 배포 작업 연결 | `ansible/playbook/deploy.yml` |
+| 6 | 사용자에게 제공할 단일 접속 주소 | `ansible/roles/nginx_lb/`, `ansible/playbook/nginx.yml` |
+| 7 | 배포 후 경유 검사 | `ansible/playbook/verify.yml` |
+| 8 | SSH 호스트 키 준비 및 전체 과정 자동 실행 | `ansible/playbook/prepare_ssh.yml`, `Jenkinsfile` |
 
 ## 1. 정상 응답하는 작은 앱 — app/default.conf.template
 
-[app/default.conf.template](app/default.conf.template)은 앱 컨테이너 안에서 실행되는 Nginx의 설정 원본이다. 이 프로젝트의 앱은 별도 웹 프레임워크 없이 Nginx가 직접 문자열을 응답하는 실습용 앱이다.
+[app/default.conf.template](../app/default.conf.template)은 앱 컨테이너 안에서 실행되는 Nginx의 설정 원본이다. 이 프로젝트의 앱은 별도 웹 프레임워크 없이 Nginx가 직접 문자열을 응답하는 실습용 앱이다.
 
 | 요청 경로 | HTTP 상태 | 응답 본문 | 목적 |
 | --- | --- | --- | --- |
@@ -38,7 +38,7 @@ default.conf.template
 
 ## 2. 앱을 같은 환경에서 실행할 이미지 — Dockerfile
 
-[Dockerfile](Dockerfile)은 위 설정을 포함한 Docker 이미지를 만든다.
+[Dockerfile](../Dockerfile)은 위 설정을 포함한 Docker 이미지를 만든다.
 
 ```dockerfile
 FROM nginx:alpine
@@ -67,7 +67,7 @@ Jenkins Build
 
 ## 3. 배포 대상 목록 — ansible/inventory.ini
 
-[ansible/inventory.ini](ansible/inventory.ini)는 Ansible이 관리할 서버와 그룹을 정의한다.
+[ansible/inventory.ini](../ansible/inventory.ini)는 Ansible이 관리할 서버와 그룹을 정의한다.
 
 | 그룹 | inventory의 호스트 이름 | 실제 접속 IP | 역할 |
 | --- | --- | --- | --- |
@@ -81,7 +81,7 @@ Jenkins Build
 Jenkins는 다음 옵션으로 inventory를 사용한다.
 
 ```sh
-ansible-playbook -i ansible/inventory.ini ansible/deploy.yml ...
+ansible-playbook -i ansible/inventory.ini ansible/playbook/deploy.yml ...
 ```
 
 inventory에는 SSH 사용자명이나 개인 키가 없다. Jenkins credential에서 읽은 값을 `ANSIBLE_REMOTE_USER`, `ANSIBLE_PRIVATE_KEY_FILE`로 전달한다. 별도 SSH 포트 지정은 없으므로 기본 설정 기준 22번 포트를 사용한다.
@@ -101,7 +101,7 @@ role은 관련 변수와 작업을 묶는 Ansible의 구성 단위다. `app` rol
 
 ### 4-1. defaults/main.yml: 배포 기본값
 
-[ansible/roles/app/defaults/main.yml](ansible/roles/app/defaults/main.yml)은 다음 기본값을 제공한다.
+[ansible/roles/app/defaults/main.yml](../ansible/roles/app/defaults/main.yml)은 다음 기본값을 제공한다.
 
 | 변수 | 기본값 | 용도 |
 | --- | --- | --- |
@@ -116,7 +116,7 @@ Jenkins는 `-e` 옵션으로 `image_name`, `image_tag`, `image_tar`를 전달한
 
 ### 4-2. tasks/main.yml: 각 앱 서버에서 실행할 작업
 
-[ansible/roles/app/tasks/main.yml](ansible/roles/app/tasks/main.yml)의 task는 아래 순서로 실행된다. `copy`는 Jenkins agent의 파일을 원격 서버로 전송하고, Docker 명령과 `uri` 검사는 대상 앱 서버에서 실행된다.
+[ansible/roles/app/tasks/main.yml](../ansible/roles/app/tasks/main.yml)의 task는 아래 순서로 실행된다. `copy`는 Jenkins agent의 파일을 원격 서버로 전송하고, Docker 명령과 `uri` 검사는 대상 앱 서버에서 실행된다.
 
 | 순서 | 코드의 task 이름 | 동작과 결과 |
 | --- | --- | --- |
@@ -156,23 +156,23 @@ docker run -d \
 
 현재 구현은 같은 버전으로 다시 배포해도 기존 컨테이너를 제거하고 새로 만든다. 중간 task가 실패한 호스트에서는 뒤의 일반 task가 진행되지 않으므로, 마지막 tar 삭제가 항상 보장되는 것은 아니다. 자동 롤백도 정의돼 있지 않다.
 
-## 5. 대상 그룹과 배포 작업 연결 — ansible/deploy.yml
+## 5. 대상 그룹과 배포 작업 연결 — ansible/playbook/deploy.yml
 
-[ansible/deploy.yml](ansible/deploy.yml)은 “어느 서버에 어떤 role을 실행할 것인가”를 연결한다.
+[ansible/playbook/deploy.yml](../ansible/playbook/deploy.yml)은 “어느 서버에 어떤 role을 실행할 것인가”를 연결한다.
 
 ```yaml
 - name: Deploy Sohyeon CI/CD application
   hosts: app_servers
   gather_facts: false
   roles:
-    - role: app
+    - role: "{{ playbook_dir }}/../roles/app"
 ```
 
 | 항목 | 의미 |
 | --- | --- |
 | `hosts: app_servers` | inventory의 앱 서버 3대를 대상으로 지정 |
 | `gather_facts: false` | 시작 시 시스템 정보 자동 수집 생략 |
-| `roles: app` | app role의 기본 변수와 `tasks/main.yml`을 사용 |
+| `role: "{{ playbook_dir }}/../roles/app"` | 플레이북 위치를 기준으로 `ansible/roles/app`의 기본 변수와 `tasks/main.yml`을 사용 |
 
 ```text
 Jenkins Deploy
@@ -227,13 +227,13 @@ Jenkins Deploy
 
 ### 6-1. templates/sohyeon.conf.j2: 요청 분산 설정
 
-[ansible/roles/nginx_lb/templates/sohyeon.conf.j2](ansible/roles/nginx_lb/templates/sohyeon.conf.j2)은 로드밸런서 서버에 배치할 설정 원본이다.
+[ansible/roles/nginx_lb/templates/sohyeon.conf.j2](../ansible/roles/nginx_lb/templates/sohyeon.conf.j2)은 로드밸런서 서버에 배치할 설정 원본이다.
 
-```nginx
+```jinja2
 upstream sohyeon_backend {
-    server 1.201.118.202:20007;
-    server 1.201.118.10:20007;
-    server 1.201.118.90:20007;
+{% for host in groups['app_servers'] %}
+    server {{ hostvars[host]['ansible_host'] }}:20007;
+{% endfor %}
 }
 
 server {
@@ -251,11 +251,11 @@ server {
 
 실제 파일의 `proxy_set_header`는 Host 및 원래 클라이언트 IP·전달 경로·프로토콜 정보를 백엔드에 전달한다.
 
-확장자는 `.j2`지만 현재는 Jinja2 변수나 반복문이 없다. 서버 IP와 포트가 고정돼 있어 inventory를 수정해도 이 템플릿이 자동으로 바뀌지는 않는다.
+Jinja2 반복문이 inventory의 `app_servers`를 순회하고 각 호스트의 `ansible_host`로 upstream 항목을 만든다. 서버 IP·대수는 inventory에서 관리하며, 변경한 목록은 `CONFIGURE_NGINX=true`로 플레이북을 실행할 때 실제 설정에 반영된다. 앱 포트 `20007`과 수신 포트 `18007`은 여전히 템플릿에 지정돼 있다.
 
 ### 6-2. tasks/main.yml과 handlers/main.yml: 설정 적용 순서
 
-[tasks/main.yml](ansible/roles/nginx_lb/tasks/main.yml)과 [handlers/main.yml](ansible/roles/nginx_lb/handlers/main.yml)의 실행 흐름은 다음과 같다.
+[tasks/main.yml](../ansible/roles/nginx_lb/tasks/main.yml)과 [handlers/main.yml](../ansible/roles/nginx_lb/handlers/main.yml)의 실행 흐름은 다음과 같다.
 
 | 순서 | task 또는 handler | 동작 |
 | --- | --- | --- |
@@ -269,11 +269,11 @@ server {
 
 ### 6-3. nginx.yml: 로드밸런서에 role 실행
 
-[ansible/nginx.yml](ansible/nginx.yml)은 `hosts: load_balancer`에 `nginx_lb` role을 연결한다. `gather_facts: false`로 자동 정보 수집을 생략한다.
+[ansible/playbook/nginx.yml](../ansible/playbook/nginx.yml)은 `hosts: load_balancer`에 `nginx_lb` role을 연결한다. `gather_facts: false`로 자동 정보 수집을 생략한다. role 경로는 `{{ playbook_dir }}/../roles/nginx_lb`로 지정해 하위 디렉터리에서도 기존 role을 찾는다.
 
 ```text
 Jenkins Configure Nginx — CONFIGURE_NGINX=true일 때
-  → ansible/nginx.yml
+  → ansible/playbook/nginx.yml
   → inventory의 load_balancer 선택
   → SSH로 1.201.116.156에 접속
   → nginx_lb role
@@ -312,9 +312,9 @@ flowchart TD
 | `app/default.conf.template` | 각 앱 컨테이너 내부 | 80번 포트에서 응답 생성 |
 | `sohyeon.conf.j2` | 로드밸런서 서버 | 18007번 포트에서 받은 요청을 앱 서버의 20007번 포트로 전달 |
 
-## 7. 배포 후 경유 검사 — ansible/verify.yml
+## 7. 배포 후 경유 검사 — ansible/playbook/verify.yml
 
-[ansible/verify.yml](ansible/verify.yml)은 role을 호출하지 않고 playbook 안에 검증 task를 직접 정의한다. 실행 대상은 `load_balancer`이며 자동 시스템 정보 수집은 생략한다.
+[ansible/playbook/verify.yml](../ansible/playbook/verify.yml)은 role을 호출하지 않고 playbook 안에 검증 task를 직접 정의한다. 실행 대상은 `load_balancer`이며 자동 시스템 정보 수집은 생략한다.
 
 | 순서 | task | 요청·검사 |
 | --- | --- | --- |
@@ -352,7 +352,7 @@ Jenkins Verify
 
 ## 8. 전체 과정을 순서대로 자동 실행 — Jenkinsfile
 
-[Jenkinsfile](Jenkinsfile)은 이미지 생성부터 배포 후 검증까지의 순서를 관리한다. 일반 stage가 실패하면 이후 stage는 건너뛰고 `post { always { ... } }`의 정리 작업을 시도한다.
+[Jenkinsfile](../Jenkinsfile)은 이미지 생성부터 배포 후 검증까지의 순서를 관리한다. 일반 stage가 실패하면 이후 stage는 건너뛰고 `post { always { ... } }`의 정리 작업을 시도한다.
 
 ### 8-1. 공통 실행 설정
 
@@ -421,20 +421,45 @@ docker save -o .artifacts/sohyeon-cicd-app.tar sohyeon-cicd-app:42
 
 Ansible이 SSH로 서버에 접속할 때 사용할 전용 호스트 키 목록을 만든다.
 
-1. 프로젝트 아래 `.ssh` 디렉터리를 만들고 권한을 `700`으로 설정한다.
-2. `.ssh/known_hosts` 파일을 빈 상태로 초기화한다.
-3. `ssh-keyscan -H`로 앱 서버 3대와 로드밸런서 1대의 호스트 키를 수집해 기록한다. `-H`는 저장되는 호스트 식별자를 해시 처리한다.
-4. `known_hosts` 파일 권한을 `600`으로 설정한다.
+**존재 이유:** 이후 Deploy, Configure Nginx, Verify는 `StrictHostKeyChecking=yes`로 접속한다. 이 설정은 등록된 서버 키와 접속한 서버의 키를 대조한다. 현재는 프로젝트의 임시 `known_hosts` 파일을 사용하도록 지정했으므로 원격 작업 전에 해당 파일을 준비한다. 개인 키를 이용한 사용자 인증과 서버의 호스트 키 확인은 서로 다른 작업이다.
+
+SSH 준비가 반드시 별도 Jenkins stage여야 하는 것은 아니다. 현재 연결 설정을 유지한 채 이 stage만 삭제하면 필요한 서버 키가 없어 연결이 실패할 수 있다는 의미다. 준비와 배포를 한 번의 Ansible 실행 안에서 연속으로 진행하는 것도 가능하다.
+
+Jenkins는 다음 플레이북을 직접 실행한다.
+
+```sh
+ansible-playbook \
+  -i ansible/inventory.ini \
+  ansible/playbook/prepare_ssh.yml
+```
+
+[prepare_ssh.yml](../ansible/playbook/prepare_ssh.yml)은 `hosts: localhost`, `connection: local`, `gather_facts: false`로 Jenkins agent에서 실행된다. 원격 사용자 인증을 수행하는 단계가 아니므로 Jenkins SSH credential을 주입하지 않는다.
+
+1. `app_servers`와 `load_balancer`의 호스트 목록을 합치고 중복을 제거한다.
+2. `{{ playbook_dir }}/../../.ssh`, 즉 프로젝트 루트의 `.ssh` 디렉터리를 만들고 권한을 `0700`으로 설정한다.
+3. 각 호스트의 `ansible_host`와 `ansible_port`로 `ssh-keyscan -H -T 10 -p <포트> <주소>`를 실행한다. 주소가 없으면 inventory의 호스트 이름을, 포트가 없으면 `22`를 사용한다. `-H`는 호스트 식별자를 해시 처리하고 `-T 10`은 키 수집의 타임아웃을 지정한다.
+4. 수집된 출력을 합쳐 `.ssh/known_hosts`에 기록하고 권한을 `0600`으로 설정한다. 키 수집 명령이 실패하면 플레이북이 실패하고 Jenkins의 후속 배포 단계도 진행되지 않는다.
 
 | 정보 | 역할 | 출처 |
 | --- | --- | --- |
-| inventory | 어느 서버에 작업을 실행할지 지정 | `ansible/inventory.ini` |
-| SSH 사용자·개인 키 | 접속 사용자를 인증 | Jenkins credential |
-| `known_hosts` | 접속 서버의 호스트 키를 대조 | 이 stage에서 생성 |
+| inventory | 작업 대상과 키를 수집할 서버 주소 지정 | `ansible/inventory.ini` |
+| SSH 사용자·개인 키 | 후속 원격 작업의 접속 사용자를 인증 | Jenkins credential |
+| `known_hosts` | 접속 서버의 호스트 키를 대조 | `prepare_ssh.yml`에서 생성 |
 
-`ssh-keyscan`은 Ansible 도구가 아니므로 inventory를 자동으로 읽지 않는다. 현재 코드는 네 IP를 Jenkinsfile에 직접 적었다. 이후 Ansible 실행에서는 inventory를 사용한다.
+`ssh-keyscan` 자체는 inventory를 읽지 않는다. Ansible 플레이북이 inventory에서 주소를 읽어 명령에 전달하므로 Jenkinsfile에 서버 IP를 중복 작성할 필요가 없다.
 
 매 빌드마다 호스트 키를 새로 수집하므로 이전 빌드의 키와 비교하는 구조는 아니다.
+
+```text
+Prepare SSH: agent의 프로젝트/.ssh/known_hosts 생성
+  → Deploy·Configure Nginx·Verify에서 UserKnownHostsFile로 해당 파일 지정
+  → agent의 SSH 클라이언트가 서버 키 대조
+  → Jenkins credential의 사용자명·개인 키로 사용자 인증
+  → 원격 Ansible task 실행
+  → post에서 프로젝트/.ssh 삭제
+```
+
+이 파일은 접속을 시작하는 agent에서 필요하다. 로드밸런서에 만들어도 agent의 접속 준비가 되지는 않는다. 현재는 이 로컬 준비 작업을 Ansible이 수행하고, 호출 순서와 임시 파일 정리는 Jenkins가 관리한다.
 
 ### 8-7. Deploy
 
@@ -452,7 +477,7 @@ export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=${WORKSPACE}/${PROJECT_DIR}/.ssh/
 
 ansible-playbook \
   -i ansible/inventory.ini \
-  ansible/deploy.yml \
+  ansible/playbook/deploy.yml \
   --limit app_servers \
   -e "image_name=${IMAGE_NAME}" \
   -e "image_tag=${BUILD_NUMBER}" \
@@ -470,13 +495,13 @@ ansible-playbook \
 ```sh
 ansible-playbook \
   -i ansible/inventory.ini \
-  ansible/nginx.yml \
+  ansible/playbook/nginx.yml \
   --limit load_balancer
 ```
 
 실행 흐름은 `nginx.yml → nginx_lb role → 설정 배치 → 문법 검사 → 변경 시 reload`다.
 
-기본값 `false`에서는 이 stage를 건너뛴다. 앱 버전만 교체하고 기존 Nginx 설정을 계속 사용하는 배포에 해당한다. 최초 배포 등 설정이 없는 상황에서는 이 값을 활성화해 설정을 준비해야 한다.
+기본값 `false`에서는 이 stage를 건너뛴다. 앱 버전만 교체하고 기존 Nginx 설정을 계속 사용하는 배포에 해당한다. 최초 배포 등 설정이 없는 상황이나 앱 서버 IP·대수·포트가 변경된 경우에는 이 값을 활성화해 설정을 반영해야 한다. 템플릿을 수정했더라도 생성되는 설정이 기존과 같으면 reload는 발생하지 않는다.
 
 ### 8-9. Verify
 
@@ -487,7 +512,7 @@ SSH credential과 연결 환경변수를 다시 설정하고 다음 명령을 �
 ```sh
 ansible-playbook \
   -i ansible/inventory.ini \
-  ansible/verify.yml \
+  ansible/playbook/verify.yml \
   --limit load_balancer \
   -e "image_tag=${BUILD_NUMBER}"
 ```
@@ -519,7 +544,7 @@ Jenkins agent
   Prepare Artifact
     → 이미지 tar 저장
   Prepare SSH
-    → 서버 4대의 known_hosts 생성
+    → prepare_ssh.yml → inventory의 서버 4대에 대한 known_hosts를 agent에 생성
   Deploy
     → deploy.yml → 앱 서버 3대에 app role
     → 각 앱 서버의 :20007 → 컨테이너 :80 확인
@@ -541,4 +566,38 @@ Jenkins agent
 - 앱 서버 3대의 Docker, 로드밸런서의 Nginx
 - Jenkins에서 서버로의 SSH 연결, 로드밸런서에서 앱 서버의 `20007`로의 연결, 사용자가 사용할 로드밸런서의 `18007` 접근 경로
 
-이 문서의 작성 순서는 구성 요소를 이해하는 순서다. 실제 자동 실행 순서는 Jenkinsfile이 정하며, 각 playbook은 Jenkins에서 호출됐을 때 해당 대상 서버의 작업을 수행한다.
+이 문서의 작성 순서는 구성 요소를 이해하는 순서다. 실제 자동 실행 순서는 Jenkinsfile이 정하며, 각 playbook은 Jenkins에서 호출됐을 때 지정된 호스트의 작업을 수행한다. `prepare_ssh.yml`의 대상은 agent 자신인 localhost다.
+
+## 9. 현재 플레이북 구성과 책임 분리
+
+SSH 준비와 서버 작업의 플레이북을 `ansible/playbook/`에 모았다. 전체 실행 순서는 Jenkins의 각 stage가 관리한다. `release.yml` 없이 각 플레이북을 직접 실행하는 구조다.
+
+```text
+ansible/
+├── inventory.ini
+├── playbook/
+│   ├── prepare_ssh.yml     # agent에서 inventory 기반 SSH 준비
+│   ├── deploy.yml          # 앱 서버에서 app role 실행
+│   ├── nginx.yml           # 로드밸런서에서 nginx_lb role 실행
+│   └── verify.yml          # 로드밸런서에서 Nginx 경유 검사
+└── roles/
+    ├── app/
+    └── nginx_lb/
+```
+
+| 담당 | 현재 책임 |
+| --- | --- |
+| Jenkinsfile | 빌드·테스트·tar 준비, 플레이북 실행 순서, credential과 이미지 정보 전달, Nginx 설정 여부 판단, 마지막 임시 파일 정리 |
+| `inventory.ini` | 앱 서버와 로드밸런서의 그룹·주소 관리 |
+| `prepare_ssh.yml` | inventory를 읽어 agent의 `.ssh/known_hosts` 생성 |
+| `deploy.yml`, `nginx.yml` | 대상 그룹에 기존 role 적용 |
+| `verify.yml` | 로드밸런서에서 상태·버전 검사 |
+| `sohyeon.conf.j2` | inventory의 앱 서버 주소로 upstream을 생성하고 Nginx 수신·프록시 규칙 정의 |
+
+`deploy.yml`과 `nginx.yml`은 각각 `{{ playbook_dir }}/../roles/app`, `{{ playbook_dir }}/../roles/nginx_lb`를 참조한다. 플레이북이 하위 디렉터리로 이동해도 기존 `ansible/roles/`를 사용한다.
+
+SSH 연결 옵션은 후속 Jenkins stage의 `ANSIBLE_SSH_ARGS`에서 지정한다. `prepare_ssh.yml`에는 원격 그룹으로 한정하는 `--limit`을 붙이지 않으며, Deploy는 `--limit app_servers`, Configure Nginx와 Verify는 `--limit load_balancer`를 유지한다. Nginx 단계는 `CONFIGURE_NGINX=true`일 때만 실행하고, 임시 `.ssh`와 `.artifacts`는 Jenkins의 `post / always`에서 정리한다.
+
+서버 IP·대수 변경 시 inventory를 수정하면 다음 빌드의 SSH 준비에 반영된다. Nginx upstream에도 반영하려면 해당 빌드에서 `CONFIGURE_NGINX=true`로 실행해야 한다. 앱 포트는 `app` role의 `host_port`와 Nginx 템플릿의 `20007`을 함께 맞춰야 한다.
+
+변경 후 플레이북 문법 검사와 SSH 준비의 모의 실행으로 inventory 주소 반영 및 디렉터리·파일 권한을 확인했다. 실제 Jenkins 실행과 서버 배포 검증은 별도로 필요하다.
