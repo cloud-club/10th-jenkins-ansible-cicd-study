@@ -1,0 +1,8 @@
+member: dongwook
+container_name: dongwook-app
+app_port: 20003
+additional_app_port: 21003
+container_port: 8080
+deployment_slot: primary
+nginx_port: 18003
+nginx_upstream: dongwook_backend

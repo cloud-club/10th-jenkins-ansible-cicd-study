@@ -1,0 +1,18 @@
+---
+- name: Deploy Dongwook's Nginx configuration
+  ansible.builtin.template:
+    src: dongwook.conf.j2
+    dest: /etc/nginx/conf.d/dongwook.conf
+    mode: '0644'
+  register: nginx_config
+
+- name: Validate Nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  when: nginx_config.changed
+
+- name: Reload Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  when: nginx_config.changed

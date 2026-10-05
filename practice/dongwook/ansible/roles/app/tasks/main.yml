@@ -1,0 +1,133 @@
+---
+- name: Validate deployment scope and required build variables
+  ansible.builtin.assert:
+    that:
+      - member == 'dongwook'
+      - container_name == 'dongwook-app'
+      - app_port | int == 20003
+      - groups['app_servers'] | length == 3
+      - ansible_host in ['1.201.118.202', '1.201.118.10', '1.201.118.90']
+      - image_ref is defined
+      - image_repository is defined
+      - app_version is defined
+      - release_id is defined
+      - git_revision is defined
+      - image_repository is match('^[a-z0-9][a-z0-9_-]*/dongwook-app$')
+      - image_ref is match('^' ~ image_repository ~ '@sha256:[0-9a-f]{64}$')
+
+- name: Check registry credentials supplied by Jenkins
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.env', 'DOCKERHUB_USERNAME') | length > 0
+      - lookup('ansible.builtin.env', 'DOCKERHUB_TOKEN') | length > 0
+  no_log: true
+
+- name: Create an isolated Docker authentication directory
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: dongwook-docker-auth-
+  register: registry_config
+
+- name: Pull the tested image from Docker Hub
+  block:
+    - name: Authenticate using a token via stdin
+      ansible.builtin.command:
+        argv:
+          - docker
+          - --config
+          - "{{ registry_config.path }}"
+          - login
+          - --username
+          - "{{ lookup('ansible.builtin.env', 'DOCKERHUB_USERNAME') }}"
+          - --password-stdin
+        stdin: "{{ lookup('ansible.builtin.env', 'DOCKERHUB_TOKEN') }}"
+      no_log: true
+      changed_when: false
+
+    - name: Pull the exact digest published by Jenkins
+      ansible.builtin.command:
+        argv: [docker, --config, "{{ registry_config.path }}", pull, "{{ image_ref }}"]
+      register: pulled_image
+      changed_when: "'Downloaded newer image' in pulled_image.stdout"
+  always:
+    - name: Remove only this deployment's Docker authentication directory
+      ansible.builtin.file:
+        path: "{{ registry_config.path }}"
+        state: absent
+
+- name: Inspect only Dongwook's container
+  ansible.builtin.command:
+    argv: [docker, container, inspect, "{{ container_name }}"]
+  register: existing_container
+  changed_when: false
+  failed_when: >-
+    existing_container.rc != 0 and
+    'No such container' not in existing_container.stderr and
+    'No such object' not in existing_container.stderr
+
+- name: Refuse to replace a container without our ownership label
+  ansible.builtin.assert:
+    that:
+      - (existing_container.stdout | from_json)[0].Config.Labels['owner'] | default('') == member
+  when: existing_container.rc == 0
+
+- name: Check whether a replacement is needed
+  ansible.builtin.set_fact:
+    replace_container: >-
+      {{ existing_container.rc != 0 or
+        (existing_container.stdout | from_json)[0].Config.Image != image_ref or
+        ('INSTANCE_ID=' ~ inventory_hostname) not in (existing_container.stdout | from_json)[0].Config.Env or
+        ('DEPLOYMENT_SLOT=' ~ deployment_slot) not in (existing_container.stdout | from_json)[0].Config.Env or
+        not (existing_container.stdout | from_json)[0].State.Running }}
+
+- name: Remove only our previous container
+  ansible.builtin.command:
+    argv: [docker, rm, --force, "{{ container_name }}"]
+  when: existing_container.rc == 0 and replace_container | bool
+  changed_when: true
+
+- name: Start the new application
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --detach
+      - --name
+      - "{{ container_name }}"
+      - --label
+      - "owner={{ member }}"
+      - --restart
+      - unless-stopped
+      - --publish
+      - "{{ app_port }}:{{ container_port }}"
+      - --env
+      - "INSTANCE_ID={{ inventory_hostname }}"
+      - --env
+      - "DEPLOYMENT_SLOT={{ deployment_slot }}"
+      - "{{ image_ref }}"
+  when: replace_container | bool
+  changed_when: true
+
+- name: Wait for a healthy application
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/health"
+    return_content: true
+  register: health
+  until: health.status == 200 and (health.json.status | default('')) == 'ok'
+  retries: 15
+  delay: 2
+
+- name: Read deployed version
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/version"
+    return_content: true
+  register: version_response
+
+- name: Verify this server runs the tested release
+  ansible.builtin.assert:
+    that:
+      - version_response.json.version == app_version
+      - version_response.json.release == release_id
+      - version_response.json.revision == git_revision
+      - version_response.json.instance == inventory_hostname
+      - version_response.json.slot == deployment_slot
