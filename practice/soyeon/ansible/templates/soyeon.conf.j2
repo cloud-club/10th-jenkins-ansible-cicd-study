@@ -1,0 +1,19 @@
+upstream soyeon_backend {
+{% for host in groups['app_servers'] %}
+    server {{ hostvars[host].ansible_host }}:{{ app_port }};
+{% endfor %}
+}
+
+server {
+    listen {{ nginx_listen_port }};
+    server_name _;
+
+    location / {
+        proxy_pass http://soyeon_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
