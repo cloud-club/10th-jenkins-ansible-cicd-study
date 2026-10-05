@@ -31,20 +31,15 @@ pipeline {
 
         stage('Test') {
             steps {
-                dir("${APP_DIR}") {
-                    sh '''
-                        chmod +x gradlew
-                        ./gradlew test
-                    ''' // 애플리케이션 테스트 실행
-                }
+                sh 'sh practice/taehyeon/scripts/gradle-in-docker.sh test'
+                // Agent의 Java 21과 독립적으로 JDK 25 컨테이너에서 테스트
             }
         }
 
         stage('Build') {
             steps {
-                dir("${APP_DIR}") {
-                    sh './gradlew bootJar' // 실행 가능한 Spring Boot JAR 생성
-                }
+                sh 'sh practice/taehyeon/scripts/gradle-in-docker.sh bootJar'
+                // 동일한 JDK 25 환경에서 배포용 JAR 생성
             }
         }
 

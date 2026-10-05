@@ -13,6 +13,7 @@ practice/taehyeon/
 │       ├── defaults/main.yml # 앱 포트와 배포 경로 기본값
 │       └── tasks/main.yml    # 이미지 전달, 컨테이너 교체, Health Check
 ├── scripts/
+│   ├── gradle-in-docker.sh    # JDK 25 컨테이너에서 Gradle 실행
 │   ├── test-image.sh          # 배포 이미지 실행 테스트
 │   └── verify.py              # 상태와 빌드 메타데이터 검증
 └── Jenkinsfile
@@ -49,7 +50,7 @@ Jenkins에서는 Docker Build → Docker Image Test → Docker Save 순서로 �
 - Agent Label: `ansible-agent` (실제 VM 2의 Label과 일치해야 한다)
 - SSH Credential ID: `taehyeon-appserver-ssh`
 - Jenkinsfile의 `sshagent` 단계에는 SSH Agent 플러그인이 필요하다.
-- Agent에는 Docker, Python 3, Ansible과 Java 25 빌드 환경이 필요하다.
+- Agent에는 Docker, Python 3, Ansible이 필요하다. 테스트와 JAR 빌드는 JDK 25 컨테이너에서 실행하므로 Agent에 Java 25를 설치할 필요가 없다.
 - App Server 포트: `20001`, Nginx 포트: `18001`
 - Nginx 검증 단계는 개인별 Nginx 설정을 적용한 뒤 실행한다.
 
@@ -74,3 +75,22 @@ Docker 빌드 인자로 이미지의 환경 변수에 저장하므로 이미지 
 이미지 테스트, App Server 3대의 Ansible 검증, Nginx를 통한 최종 검증에서
 메타데이터가 다르면 배포 파이프라인이 실패한다. Nginx 검증은 응답한 서버의
 정보를 검사하며, 세 서버 각각의 검증은 Ansible이 수행한다.
+
+## Agent의 Java 버전과 독립적으로 빌드
+
+Jenkins의 Test와 Build 단계는 `eclipse-temurin:25-jdk` 컨테이너에서
+Gradle Wrapper를 실행한다. Agent의 Java가 21이어도 프로젝트의 Java 25를 유지한다.
+Docker Hub, Gradle 배포 서버와 Maven Central에 접근할 수 있어야 한다.
+
+저장소 루트에서 같은 빌드를 실행할 수 있다.
+
+```bash
+sh practice/taehyeon/scripts/gradle-in-docker.sh test
+sh practice/taehyeon/scripts/gradle-in-docker.sh bootJar
+```
+
+앱 디렉터리를 컨테이너에 연결하므로 생성된 JAR은 기존 `app/build/libs/`에 남고,
+다음 Docker Build 단계가 그대로 사용한다. Agent의 UID/GID로 실행해 결과물이
+root 소유가 되는 것을 방지하며, Gradle 캐시는 `app/.gradle/ci-cache/`에 보관한다.
+컨테이너는 종료 시 자동 제거된다. Agent 작업 디렉터리는 Docker daemon에서도
+동일한 호스트 경로로 접근할 수 있어야 한다.
