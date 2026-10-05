@@ -1,0 +1,7 @@
+---
+- name: Deploy the same Soyeon application image to all app servers
+  hosts: app_servers
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: app
