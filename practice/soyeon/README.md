@@ -69,7 +69,7 @@ curl http://127.0.0.1:8000/version
 7. Docker Hub 계정 `wosyh18`의 `cc-practice` 저장소를 **공개**로 설정합니다.
 8. Docker Hub에서 발급한 Access Token을 Jenkins의 `Username with password` Credential로 등록합니다. Username에는 `wosyh18`, Password에는 Access Token을 넣습니다. 기본 ID는 `soyeon-dockerhub`입니다.
 9. `DOCKERHUB_NAMESPACE` 빌드 파라미터의 기본값 `wosyh18`을 확인합니다.
-10. `AGENT_LABEL`의 기본값 `ansible`을 실제 Jenkins Agent Label로 변경합니다.
+10. `AGENT_LABEL`의 기본값은 공통 Jenkins Agent 이름인 `ansible-agent`입니다. 노드 이름이 바뀌면 이 값도 변경합니다.
 
 첫 저장 후 `Build with Parameters`에서 Agent Label, namespace, 두 Credential ID를 확인합니다. Jenkins Agent는 Docker Hub에 push할 수 있어야 하고, App Server 3대는 Docker Hub에서 이미지를 pull할 수 있어야 합니다. Pipeline은 SSH 키나 Access Token을 저장소에 기록하지 않습니다.
 

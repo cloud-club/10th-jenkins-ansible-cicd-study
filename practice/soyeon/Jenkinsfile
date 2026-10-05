@@ -9,7 +9,7 @@ pipeline {
     }
 
     parameters {
-        string(name: 'AGENT_LABEL', defaultValue: 'ansible', description: '공통 Jenkins Agent의 실제 Label')
+        string(name: 'AGENT_LABEL', defaultValue: 'ansible-agent', description: '공통 Jenkins Agent의 이름 또는 Label')
         string(name: 'SSH_CREDENTIALS_ID', defaultValue: 'soyeon-app-server-ssh', description: 'SSH Username with private key 타입의 Jenkins Credential ID')
         string(name: 'DOCKERHUB_NAMESPACE', defaultValue: 'wosyh18', description: '공개 Docker Hub 저장소의 계정명 또는 namespace')
         string(name: 'DOCKERHUB_CREDENTIALS_ID', defaultValue: 'soyeon-dockerhub', description: 'Docker Hub Username with password 타입 Credential ID (password는 Access Token)')
