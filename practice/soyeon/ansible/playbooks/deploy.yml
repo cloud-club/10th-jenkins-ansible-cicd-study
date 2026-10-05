@@ -5,5 +5,8 @@
   become_user: root
   gather_facts: true
   serial: 1
+  any_errors_fatal: true
   roles:
     - role: app
+
+- import_playbook: configure-nginx.yml

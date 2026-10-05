@@ -79,18 +79,9 @@ curl http://127.0.0.1:8000/version
 
 ## Nginx 최초 설정
 
-Nginx 설정은 공용 서버를 reload하므로 팀원과 먼저 공유한 다음 한 번만 실행합니다. Jenkins의 일반 애플리케이션 배포에는 Nginx reload가 포함되지 않습니다.
+Jenkins의 `Deploy App + Nginx` Stage는 App Server 3대 배포가 모두 성공하면 Nginx 서버에 `/etc/nginx/conf.d/soyeon.conf`를 적용합니다. 파일이 없으면 처음 생성합니다. 파일 내용이 바뀐 경우에만 `nginx -t`로 전체 설정을 검사한 뒤 공용 Nginx를 reload합니다. 설정이 동일한 후속 배포에서는 reload하지 않습니다.
 
-```bash
-cd ansible
-ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
-  -i inventory/hosts.ini \
-  -u '<SSH 사용자>' \
-  --private-key '<개인 키 경로>' \
-  playbooks/configure-nginx.yml
-```
-
-설정 파일은 `/etc/nginx/conf.d/soyeon.conf`만 변경하고, 반영 전에 `nginx -t`를 수행합니다.
+Nginx는 팀이 공유하므로 첫 실행 전에 다른 팀원이 같은 시간에 Nginx 설정을 배포하거나 reload하지 않는지 확인합니다.
 
 ## 배포 흐름
 
@@ -102,7 +93,8 @@ ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
 6. Ansible로 App Server 3대가 같은 digest를 pull
 7. 각 서버에서 `soyeon-app` 컨테이너만 교체
 8. 각 서버의 `/health`와 배포 버전 확인
-9. Nginx `18002`를 통한 최종 확인
+9. 개인 Nginx 설정을 확인하고 변경된 경우 `nginx -t` 후 reload
+10. Nginx `18002`를 통한 최종 확인
 
 현재 Inventory에는 제공받은 Public IP가 들어 있습니다. 서버의 Private IP를 제공받으면 `ansible/inventory/hosts.ini`의 `ansible_host`와 Nginx upstream을 Private IP로 변경하는 것을 권장합니다.
 

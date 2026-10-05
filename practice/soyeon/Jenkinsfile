@@ -140,7 +140,7 @@ pipeline {
             }
         }
 
-        stage('Deploy to 3 App Servers') {
+        stage('Deploy App + Nginx') {
             steps {
                 dir("${env.WORK_DIR}/ansible") {
                     withCredentials([
