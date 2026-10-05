@@ -1,0 +1,5 @@
+---
+app_host_port: 20001 # 고태현에게 할당된 App Server 포트
+app_container_port: 8080 # Spring Boot 컨테이너 내부 포트
+app_container_name: "{{ app_name }}"
+image_tar_remote: "/tmp/{{ app_name }}-{{ image_tag }}.tar"

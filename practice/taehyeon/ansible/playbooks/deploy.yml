@@ -1,0 +1,9 @@
+---
+- name: Deploy Spring Boot application to all App Servers
+  hosts: app_servers
+  gather_facts: false
+  become: false
+
+  # app Role에서 이미지 전달, 컨테이너 실행, Health Check 수행
+  roles:
+    - app
