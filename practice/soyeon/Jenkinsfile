@@ -26,7 +26,7 @@ pipeline {
                 checkout scm
                 script {
                     def namespace = (params.DOCKERHUB_NAMESPACE ?: '').trim().toLowerCase()
-                    if (!(namespace ==~ /[a-z0-9][a-z0-9_-]*/)) {
+                    if (!namespace.matches('[a-z0-9][a-z0-9_-]*')) {
                         error('DOCKERHUB_NAMESPACE에 Docker Hub 계정명 또는 namespace를 입력하세요.')
                     }
                     env.GIT_REVISION = sh(
@@ -116,15 +116,15 @@ pipeline {
                                     returnStdout: true
                                 )
                                 def digestLine = pushOutput.readLines().find {
-                                    it ==~ /.*digest: sha256:[0-9a-f]{64}.*/
+                                    it.contains('digest: sha256:')
                                 }
                                 if (!digestLine) {
                                     error('Docker Hub push 결과에서 이미지 digest를 찾지 못했습니다.')
                                 }
-                                def pushedDigest = digestLine.replaceAll(
-                                    /.*digest: (sha256:[0-9a-f]{64}).*/,
-                                    '$1'
-                                )
+                                def pushedDigest = digestLine.split('digest: ')[1].split(' ')[0]
+                                if (!pushedDigest.matches('sha256:[0-9a-f]{64}')) {
+                                    error('Docker Hub push 결과의 이미지 digest 형식이 올바르지 않습니다.')
+                                }
                                 env.IMAGE_REF = "${env.IMAGE_REPO}@${pushedDigest}"
                                 echo "Published ${env.IMAGE_REF}"
                             } finally {
