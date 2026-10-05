@@ -5,4 +5,4 @@
   gather_facts: false
 
   roles:
-    - role: app 
+    - role: "{{ playbook_dir }}/../roles/app"

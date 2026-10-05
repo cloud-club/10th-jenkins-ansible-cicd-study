@@ -5,4 +5,4 @@
   gather_facts: false
 
   roles:
-    - role: nginx_lb
+    - role: "{{ playbook_dir }}/../roles/nginx_lb"

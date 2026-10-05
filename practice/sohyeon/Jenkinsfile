@@ -133,19 +133,9 @@ pipeline {
                     sh '''
                         echo "=== Prepare Private known_hosts ==="
 
-                        mkdir -p .ssh
-                        chmod 700 .ssh
-
-                        : > .ssh/known_hosts
-
-                        ssh-keyscan -H \
-                          1.201.118.202 \
-                          1.201.118.10 \
-                          1.201.118.90 \
-                          1.201.116.156 \
-                          >> .ssh/known_hosts
-
-                        chmod 600 .ssh/known_hosts
+                        ansible-playbook \
+                          -i ansible/inventory.ini \
+                          ansible/playbook/prepare_ssh.yml
                     '''
                 }
             }
@@ -171,7 +161,7 @@ pipeline {
 
                             ansible-playbook \
                               -i ansible/inventory.ini \
-                              ansible/deploy.yml \
+                              ansible/playbook/deploy.yml \
                               --limit app_servers \
                               -e "image_name=${IMAGE_NAME}" \
                               -e "image_tag=${BUILD_NUMBER}" \
@@ -208,7 +198,7 @@ pipeline {
 
                             ansible-playbook \
                               -i ansible/inventory.ini \
-                              ansible/nginx.yml \
+                              ansible/playbook/nginx.yml \
                               --limit load_balancer
                         '''
                     }
@@ -236,7 +226,7 @@ pipeline {
 
                             ansible-playbook \
                             -i ansible/inventory.ini \
-                            ansible/verify.yml \
+                            ansible/playbook/verify.yml \
                             --limit load_balancer \
                             -e "image_tag=${BUILD_NUMBER}"
                         '''
