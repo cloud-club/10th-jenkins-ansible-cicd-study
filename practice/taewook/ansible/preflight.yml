@@ -1,0 +1,29 @@
+---
+- name: Check SSH and sudo access without changing servers
+  hosts: all
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Confirm expected personal scope
+      ansible.builtin.assert:
+        that:
+          - owner == 'taewook'
+          - app_port == 20004
+          - lb_port == 18004
+          - app_container == 'taewook-app'
+          - nginx_conf == '/etc/nginx/conf.d/taewook.conf'
+    - name: Check Python over SSH
+      ansible.builtin.ping:
+    - name: Check Docker on app servers
+      ansible.builtin.command: docker info --format '{{ "{{.ServerVersion}}" }}'
+      changed_when: false
+      when: inventory_hostname in groups['app']
+    - name: Check existing Nginx configuration before deployment
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      when: inventory_hostname in groups['lb']
+    - name: Confirm flock is available
+      ansible.builtin.command: flock --version
+      changed_when: false
+      when: inventory_hostname in groups['lb']

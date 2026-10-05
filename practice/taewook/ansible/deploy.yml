@@ -1,0 +1,16 @@
+---
+- name: Deploy one tested image to all three app servers
+  hosts: app
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  roles:
+    - app
+
+- name: Configure Taewook's Nginx service after all apps pass
+  hosts: lb
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  roles:
+    - nginx
