@@ -9,9 +9,9 @@ practice/taehyeon/
 │   ├── ansible.cfg
 │   ├── inventory/hosts.ini    # App Server 3대와 SSH 사용자
 │   ├── playbooks/             # deploy.yml, ping.yml
-│   └── roles/app/
-│       ├── defaults/main.yml # 앱 포트와 배포 경로 기본값
-│       └── tasks/main.yml    # 이미지 전달, 컨테이너 교체, Health Check
+│   └── roles/
+│       ├── app/              # 이미지 전달, 컨테이너 교체, 빌드 정보 검증
+│       └── nginx/            # 개인 설정 템플릿, 공통 잠금, 검사 및 복구
 ├── scripts/
 │   ├── gradle-in-docker.sh    # JDK 25 컨테이너에서 Gradle 실행
 │   ├── test-image.sh          # 배포 이미지 실행 테스트
@@ -52,7 +52,7 @@ Jenkins에서는 Docker Build → Docker Image Test → Docker Save 순서로 �
 - Jenkinsfile의 `sshagent` 단계에는 SSH Agent 플러그인이 필요하다.
 - Agent에는 Docker, Python 3, Ansible이 필요하다. 테스트와 JAR 빌드는 JDK 25 컨테이너에서 실행하므로 Agent에 Java 25를 설치할 필요가 없다.
 - App Server 포트: `20001`, Nginx 포트: `18001`
-- Nginx 검증 단계는 개인별 Nginx 설정을 적용한 뒤 실행한다.
+- 앱 배포·검증 후 nginx Role이 개인 설정을 적용하고, Jenkins가 Nginx를 통해 최종 검증한다.
 
 ## Ansible 문법 확인
 
@@ -99,3 +99,26 @@ App Server의 Docker 작업(이미지 로드, 기존 컨테이너 확인·삭제
 `become: true`로 실행한다. SSH 접속 계정 `taehyeon`에 비밀번호 없는 sudo 권한이
 미리 허용되어 있어야 하며, 이 설정 자체가 서버 계정에 권한을 부여하지는 않는다.
 이미지 파일 복사와 API 검증은 기존 SSH 계정으로 실행한다.
+
+## Nginx Role
+
+`roles/nginx/`의 defaults, template, tasks와 적용 스크립트로 개인 설정을 관리한다.
+App Server 3대의 배포가 모두 성공해야 Nginx Play가 실행된다.
+`1.201.116.156:18001`에서 세 App Server의 `20001` 포트로 요청을 분산한다.
+
+Nginx 서버의 `taehyeon` 계정에도 SSH 공개키와 비밀번호 없는 sudo 권한이 필요하다.
+서버에 설치된 Nginx가 `/etc/nginx/conf.d/*.conf`를 포함하고, `flock` 및 systemctl을
+사용할 수 있어야 한다. Nginx 설치나 서비스 재시작은 수행하지 않는다.
+
+설정은 `/tmp/taehyeon-nginx/`에 먼저 생성한다. Nginx 서버에서 세 앱의 상태와
+빌드 정보를 확인한 뒤 공통 잠금 `/var/lock/nginx-cicd.lock` 안에서 개인 설정의
+백업·적용·`nginx -t`·reload를 실행한다. 검사나 reload가 실패하면 개인 설정을
+복구하고 파이프라인을 실패 처리한다. 설정이 같으면 reload하지 않는다.
+다른 배포도 같은 잠금을 사용해야 동시 적용을 막을 수 있다.
+공용 Nginx 설정 적용·reload는 스터디 운영 규칙에 맞춰 조율한다.
+
+적용 스크립트의 로컬 테스트는 Linux 환경에서 실행한다.
+
+```bash
+bash practice/taehyeon/tests/test-nginx-config.sh
+```
