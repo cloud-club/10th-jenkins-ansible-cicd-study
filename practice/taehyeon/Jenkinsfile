@@ -1,0 +1,132 @@
+pipeline {
+    agent {
+        label 'ansible-agent' // Jenkins Agent에서 빌드와 배포 실행
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        APP_NAME = 'taehyeon-app' // Docker 이미지와 컨테이너 이름
+        APP_DIR = 'practice/taehyeon/app'
+        ANSIBLE_DIR = 'practice/taehyeon/ansible'
+        APP_VERSION = "${BUILD_NUMBER}" // API에 표시할 버전
+        IMAGE_TAG = "${BUILD_NUMBER}" // Jenkins 빌드 번호를 이미지 버전으로 사용
+        NGINX_HOST = '1.201.116.156' // 공용 Nginx Load Balancer
+        NGINX_PORT = '18001' // 고태현에게 할당된 Nginx 포트
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm // Git 저장소에서 소스 코드 가져오기
+                script {
+                    env.GIT_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    env.RELEASE_ID = "build-${env.BUILD_NUMBER}-${env.GIT_SHA.take(12)}"
+                } // 빌드한 커밋과 이번 배포를 식별할 릴리스 생성
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'sh practice/taehyeon/scripts/gradle-in-docker.sh test'
+                // Agent의 Java 21과 독립적으로 JDK 25 컨테이너에서 테스트
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'sh practice/taehyeon/scripts/gradle-in-docker.sh bootJar'
+                // 동일한 JDK 25 환경에서 배포용 JAR 생성
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh '''
+                        docker build \\
+                          --build-arg "APP_VERSION=$APP_VERSION" \\
+                          --build-arg "GIT_SHA=$GIT_SHA" \\
+                          --build-arg "RELEASE_ID=$RELEASE_ID" \\
+                          -t ${APP_NAME}:${IMAGE_TAG} \\
+                          .
+                    ''' // Agent에서 배포용 Docker 이미지 빌드
+                }
+            }
+        }
+
+        stage('Docker Image Test') {
+            steps {
+                sh 'sh practice/taehyeon/scripts/test-image.sh "$APP_NAME:$IMAGE_TAG" "$APP_VERSION" "$GIT_SHA" "$RELEASE_ID"'
+                // 배포할 이미지를 실행해 상태·버전·Git SHA·릴리스를 검사하고 임시 컨테이너 정리
+            }
+        }
+
+        stage('Docker Save') {
+            steps {
+                sh '''
+                    docker save \\
+                      ${APP_NAME}:${IMAGE_TAG} \\
+                      -o ${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar
+                ''' // Ansible이 App Server로 전달할 이미지 파일 생성
+            }
+        }
+
+        stage('Ansible Syntax Check') {
+            steps {
+                dir("${ANSIBLE_DIR}") {
+                    sh '''
+                        ansible-playbook \\
+                          -i inventory/hosts.ini \\
+                          playbooks/deploy.yml \\
+                          --syntax-check
+                    ''' // 서버에 접속하지 않고 Inventory와 Playbook 문법 확인
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                sshagent(credentials: ['taehyeon-appserver-ssh']) {
+                    dir("${ANSIBLE_DIR}") {
+                        sh '''
+                            ansible-playbook \\
+                              -i inventory/hosts.ini \\
+                              playbooks/deploy.yml \\
+                              -e app_name=${APP_NAME} \\
+                              -e app_version=${APP_VERSION} \\
+                              -e git_sha=${GIT_SHA} \\
+                              -e release_id=${RELEASE_ID} \\
+                              -e image_tag=${IMAGE_TAG} \\
+                              -e image_tar=${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar
+                        ''' // SSH Credential로 App Server 세 대에 배포
+                    }
+                }
+            }
+        }
+
+        stage('Verify via Nginx') {
+            steps {
+                sh '''
+                    python3 practice/taehyeon/scripts/verify.py \\
+                      --url "http://${NGINX_HOST}:${NGINX_PORT}" \\
+                      --version "$APP_VERSION" \\
+                      --git-sha "$GIT_SHA" \\
+                      --release "$RELEASE_ID" \\
+                      --instances app1 app2 app3
+                ''' // Nginx를 거쳐 상태·버전·Git SHA·릴리스 확인
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                rm -f ${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar || true
+            ''' // 성공 여부와 관계없이 임시 이미지 파일 정리
+        }
+    }
+}

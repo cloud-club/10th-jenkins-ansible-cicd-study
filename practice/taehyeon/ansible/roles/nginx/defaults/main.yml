@@ -1,0 +1,6 @@
+---
+nginx_listen_port: 18001 # 고태현 서비스 포트
+nginx_backend_port: 20001 # App Server의 고태현 컨테이너 포트
+nginx_config_path: /etc/nginx/conf.d/taehyeon.conf
+nginx_stage_dir: /tmp/taehyeon-nginx
+nginx_lock_path: /var/lock/nginx-cicd.lock # 민준·태욱과 같은 공통 잠금 경로

@@ -1,0 +1,8 @@
+
+---
+- name: Check connectivity to application servers
+  hosts: app_servers
+  gather_facts: false
+  tasks:
+    - name: Verify Ansible can connect over SSH
+      ansible.builtin.ping:

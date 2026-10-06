@@ -1,0 +1,70 @@
+---
+- name: Validate personal Nginx deployment scope
+  ansible.builtin.assert:
+    that:
+      - ansible_host == '1.201.116.156'
+      - nginx_listen_port | int == 18001
+      - nginx_backend_port | int == 20001
+      - nginx_config_path == '/etc/nginx/conf.d/taehyeon.conf'
+      - nginx_stage_dir == '/tmp/taehyeon-nginx'
+      - nginx_lock_path == '/var/lock/nginx-cicd.lock'
+      - groups['app_servers'] | length == 3
+      - app_version is defined
+      - git_sha is defined
+      - release_id is defined
+  # 다른 사용자의 포트와 설정을 변경하지 않도록 대상 확인
+
+- name: Verify each App Server from Nginx before routing traffic
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ nginx_backend_port }}/health"
+    status_code: 200
+    return_content: true
+    timeout: 5
+  loop: "{{ groups['app_servers'] }}"
+  register: backend_health
+  failed_when: >-
+    backend_health.status | default(0) != 200 or
+    (backend_health.json | default({})).get('status') != 'UP' or
+    (backend_health.json | default({})).get('version') != (app_version | string) or
+    (backend_health.json | default({})).get('gitSha') != git_sha or
+    (backend_health.json | default({})).get('release') != release_id or
+    (backend_health.json | default({})).get('instance') != item
+  # Agent에서 성공했더라도 Nginx 서버에서 접근할 수 있는지 확인
+
+- name: Create personal Nginx staging directory
+  ansible.builtin.file:
+    path: "{{ nginx_stage_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Render personal configuration outside conf.d
+  ansible.builtin.template:
+    src: taehyeon.conf.j2
+    dest: "{{ nginx_stage_dir }}/taehyeon.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  # 검증 전 설정이 다른 사람의 reload에 포함되지 않도록 임시 경로에 생성
+
+- name: Copy configuration apply script
+  ansible.builtin.copy:
+    src: apply-config.sh
+    dest: "{{ nginx_stage_dir }}/apply-config.sh"
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Apply and validate personal config under shared lock
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ nginx_stage_dir }}/apply-config.sh"
+      - "{{ nginx_stage_dir }}/taehyeon.conf"
+      - "{{ nginx_config_path }}"
+      - "{{ nginx_stage_dir }}/taehyeon.conf.bak"
+      - "{{ nginx_lock_path }}"
+  register: nginx_apply
+  changed_when: "'RELOADED' in nginx_apply.stdout"
+  # 검사·reload·실패 복구를 잠금 안에서 실행하므로 별도 Handler로 분리하지 않는다.
