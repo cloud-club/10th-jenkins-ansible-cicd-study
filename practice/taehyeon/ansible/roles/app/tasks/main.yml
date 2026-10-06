@@ -16,6 +16,7 @@
   # Agent에서 빌드한 이미지를 각 App Server로 전달
 
 - name: Load Docker image on App Server
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
   ansible.builtin.command:
     argv:
       - docker
@@ -26,6 +27,7 @@
   # 전달받은 tar 파일을 Docker 이미지로 등록
 
 - name: Check for an existing application container
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
   ansible.builtin.command:
     argv:
       - docker
@@ -38,6 +40,7 @@
   # 기존 컨테이너가 있는지 확인
 
 - name: Remove the existing application container
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
   ansible.builtin.command:
     argv:
       - docker
@@ -49,6 +52,7 @@
   # 같은 이름의 컨테이너가 있으면 교체
 
 - name: Start the new application container
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
   ansible.builtin.command:
     argv:
       - docker

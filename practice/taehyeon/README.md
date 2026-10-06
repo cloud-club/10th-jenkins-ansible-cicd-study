@@ -94,3 +94,8 @@ sh practice/taehyeon/scripts/gradle-in-docker.sh bootJar
 root 소유가 되는 것을 방지하며, Gradle 캐시는 `app/.gradle/ci-cache/`에 보관한다.
 컨테이너는 종료 시 자동 제거된다. Agent 작업 디렉터리는 Docker daemon에서도
 동일한 호스트 경로로 접근할 수 있어야 한다.
+
+App Server의 Docker 작업(이미지 로드, 기존 컨테이너 확인·삭제, 컨테이너 실행)은
+`become: true`로 실행한다. SSH 접속 계정 `taehyeon`에 비밀번호 없는 sudo 권한이
+미리 허용되어 있어야 하며, 이 설정 자체가 서버 계정에 권한을 부여하지는 않는다.
+이미지 파일 복사와 API 검증은 기존 SSH 계정으로 실행한다.
