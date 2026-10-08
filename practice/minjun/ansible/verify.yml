@@ -8,7 +8,7 @@
   hosts: lb
   gather_facts: false
   vars:
-    requests: 12
+    requests: 30
   tasks:
     - name: Call /version through nginx
       ansible.builtin.uri:

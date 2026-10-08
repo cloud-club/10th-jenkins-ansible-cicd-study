@@ -15,3 +15,10 @@ active_color: blue
 app_image: minjun-app
 # Jenkins가 -e로 넘겨주는 값: app_version, git_sha, image_archive
 image_tag: "{{ app_version }}-{{ git_sha }}"
+
+# 2주차: Nginx upstream에서 'down' 처리할 서버 목록.
+# 평소에는 비어 있어서 1주차와 같은 upstream이 나온다. rolling.yml이 서버별로 덮어쓴다.
+drained_hosts: []
+
+# 2주차 보안 변형 B: 배포 감사 로그 (LB에 JSON Lines로 한 줄씩 기록)
+audit_log: "/var/log/{{ owner }}-deploy.jsonl"

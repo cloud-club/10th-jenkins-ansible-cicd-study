@@ -1,9 +1,9 @@
 # Managed by Ansible ({{ owner }}). Do not edit by hand.
-# active_color={{ active_color }} port={{ nginx_active_port }}
+# port={{ nginx_active_port }} drained={{ drained_hosts | join(',') if drained_hosts else 'none' }}
 
 upstream {{ nginx_upstream }} {
 {% for h in groups['app'] %}
-    server {{ hostvars[h].ansible_host }}:{{ nginx_active_port }} max_fails=1 fail_timeout=5s;
+    server {{ hostvars[h].ansible_host }}:{{ nginx_active_port }}{{ ' down' if h in drained_hosts else '' }} max_fails=1 fail_timeout=5s;  # {{ h }}
 {% endfor %}
 }
 
@@ -17,8 +17,7 @@ server {
         proxy_read_timeout 5s;
         proxy_next_upstream error timeout http_502 http_503;
 
-        # 어느 서버가 응답했는지 헤더로 확인 (2주차 트래픽 흐름 기록용)
+        # 어느 서버가 응답했는지 헤더로 확인 (측정 CSV에 기록)
         add_header X-Upstream $upstream_addr always;
-        add_header X-Color {{ active_color }} always;
     }
 }

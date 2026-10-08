@@ -4,3 +4,5 @@ nginx_stage: "/tmp/{{ owner }}-nginx/{{ owner }}.conf"   # conf.d 밖에서 먼�
 nginx_lock: /var/lock/nginx-cicd.lock                     # 스터디 공용 락으로 제안할 경로
 nginx_upstream: "{{ owner }}_backend"                     # 이름 충돌 방지 (sohyeon_backend 패턴)
 nginx_active_port: "{{ app_ports[active_color] }}"
+# conf를 쓰고 reload할 LB. app 그룹 play에서 이 Role을 불러도 작업은 여기서 한다.
+nginx_lb_host: "{{ groups['lb'][0] }}"

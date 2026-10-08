@@ -1,32 +1,94 @@
 ---
-- name: Check if image already exists on this server
+# 2주차 보안 변형 A: 이미지 무결성 게이트
+#
+# 1주차는 "서버에 같은 태그가 이미 있으면" 로드를 건너뛰었다.
+# 그러면 누군가 같은 태그(minjun-app:v5-xxxx)로 다른 이미지를 미리 심어 두면 그대로 실행된다.
+# 태그는 이름표일 뿐 내용을 보증하지 않는다.
+#
+# 그래서 매번 CI 아카이브를 로드하고, 로드 "전"에 태그가 가리키던 ID를 판정한다.
+#   통과: 비어 있음(처음) / 이 파이프라인이 전에 로드하며 기록한 ID / 이번 CI 산출물 ID
+#   중단: 그 외 = 파이프라인 밖에서 누군가 이 태그를 붙였다 → 감사 로그에 기록하고 컨테이너를 띄우지 않는다
+#
+# v1 게이트는 "로드 전 ID == 이번 산출물 ID"만 통과시켰다. 그런데 Agent의 BuildKit이 빌드마다
+# attestation(빌드 기록)을 붙여서 같은 커밋을 다시 빌드해도 최상위 ID가 바뀐다 → 재빌드가 전부 TAMPER(오탐).
+# (빌드 #10/#12: config는 f0335529로 같고 manifest list는 47f48b05/ea3901d2로 다름)
+# 그래서 기준을 "이번 빌드와 같은가"에서 "우리 파이프라인이 붙인 태그인가"로 바꿨다.
+
+- name: Image ID under the deploy tag (before load)
   community.docker.docker_image_info:
     name: "{{ app_image }}:{{ image_tag }}"
-  register: img_info
+  register: img_before
 
-- name: Load image only when missing
-  when: img_info.images | length == 0
-  block:
-    - name: Ensure my staging dir
-      ansible.builtin.file:
-        path: "{{ app_stage_dir }}"
-        state: directory
-        mode: "0750"
+- name: Ensure my staging dir and ID record dir
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ app_stage_dir }}"
+    - "{{ app_id_dir }}"
 
-    - name: Copy image archive
-      ansible.builtin.copy:
-        src: "{{ image_archive }}"
-        dest: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
-        mode: "0640"
+- name: Copy image archive (CI artifact)
+  ansible.builtin.copy:
+    src: "{{ image_archive }}"
+    dest: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+    mode: "0640"
 
-    - name: Load image into docker
-      community.docker.docker_image_load:
-        path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+- name: Load image into docker
+  community.docker.docker_image_load:
+    path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
 
-    - name: Remove archive after load
-      ansible.builtin.file:
-        path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
-        state: absent
+- name: Remove archive after load
+  ansible.builtin.file:
+    path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+    state: absent
+
+- name: Image ID under the deploy tag (after loading CI artifact)
+  community.docker.docker_image_info:
+    name: "{{ app_image }}:{{ image_tag }}"
+  register: img_after
+
+- name: ID this pipeline recorded for the tag last time
+  ansible.builtin.slurp:
+    src: "{{ app_id_dir }}/{{ image_tag }}"
+  register: id_record
+  failed_when: false
+
+- name: Compare
+  ansible.builtin.set_fact:
+    id_before: "{{ img_before.images[0].Id if (img_before.images | length > 0) else '' }}"
+    id_after: "{{ img_after.images[0].Id }}"
+    id_recorded: "{{ (id_record.content | b64decode | trim) if (id_record.content is defined) else '' }}"
+
+# 로드했으니 지금 태그는 CI 산출물을 가리킨다 → 판정과 상관없이 기록을 갱신한다.
+# (변조가 감지된 실행에서도 기록해 둬야 다음 정상 배포가 이 ID를 "우리가 로드한 것"으로 인정한다)
+- name: Record the ID this pipeline just loaded
+  ansible.builtin.copy:
+    dest: "{{ app_id_dir }}/{{ image_tag }}"
+    content: "{{ id_after }}\n"
+    mode: "0640"
+
+- name: Record tamper in audit log
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/audit.yml"
+  vars:
+    audit_event: TAMPER_DETECTED
+    audit_extra:
+      found: "{{ id_before }}"
+      recorded: "{{ id_recorded or 'none' }}"
+      ci_artifact: "{{ id_after }}"
+  when: id_before not in ['', id_recorded, id_after]
+
+- name: Integrity gate — tag must have been set by this pipeline
+  ansible.builtin.assert:
+    that: id_before in ['', id_recorded, id_after]
+    fail_msg: >-
+      TAMPER: {{ app_image }}:{{ image_tag }} on {{ inventory_hostname }} pointed to {{ id_before }},
+      which this pipeline never loaded (recorded={{ id_recorded or 'none' }}, CI artifact={{ id_after }}).
+      Not starting a container from it.
+    success_msg: >-
+      integrity ok ({{ 'first load' if id_before == ''
+                       else ('loaded by this pipeline before' if id_before == id_recorded
+                       else 'matches CI artifact') }})
 
 # 이미지 태그가 바뀌면 컨테이너를 다시 만들고, 같으면 그대로 둔다 (멱등).
 - name: Run {{ app_container }} on host port {{ app_port }}
