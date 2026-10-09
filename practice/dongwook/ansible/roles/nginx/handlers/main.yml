@@ -1,0 +1,9 @@
+---
+- name: Reload Dongwook Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  register: nginx_reload_result
+  # The assertion immediately after flush_handlers turns this failure into a
+  # normal task failure, where the surrounding block/rescue can roll back.
+  ignore_errors: true

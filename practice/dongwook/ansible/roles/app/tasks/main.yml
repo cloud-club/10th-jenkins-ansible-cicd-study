@@ -4,7 +4,8 @@
     that:
       - member == 'dongwook'
       - container_name == 'dongwook-app'
-      - app_port | int == 20003
+      - slot_ports == {'blue':20003, 'green':21003}
+      - hostvars[groups['load_balancers'][0]].target_slot is defined
       - groups['app_servers'] | length == 3
       - ansible_host in ['1.201.118.202', '1.201.118.10', '1.201.118.90']
       - image_ref is defined
@@ -14,6 +15,22 @@
       - git_revision is defined
       - image_repository is match('^[a-z0-9][a-z0-9_-]*/dongwook-app$')
       - image_ref is match('^' ~ image_repository ~ '@sha256:[0-9a-f]{64}$')
+
+- name: Select only the inactive slot discovered on the load balancer
+  ansible.builtin.set_fact:
+    deployment_slot: "{{ hostvars[groups['load_balancers'][0]].target_slot }}"
+    active_slot: "{{ hostvars[groups['load_balancers'][0]].active_slot }}"
+
+- name: Set candidate container and port
+  ansible.builtin.set_fact:
+    candidate_name: "{{ container_name }}-{{ deployment_slot }}"
+    candidate_port: "{{ slot_ports[deployment_slot] }}"
+
+- name: Ensure the active slot cannot be replaced
+  ansible.builtin.assert:
+    that:
+      - deployment_slot in ['blue', 'green']
+      - deployment_slot != active_slot
 
 - name: Check registry credentials supplied by Jenkins
   ansible.builtin.assert:
@@ -55,9 +72,37 @@
         path: "{{ registry_config.path }}"
         state: absent
 
-- name: Inspect only Dongwook's container
+# The original deployment used dongwook-app on port 20003. Retire it only
+# when blue is inactive, after the first successful switch to green.
+- name: Retire the legacy container only when reusing the inactive blue slot
+  when: deployment_slot == 'blue'
+  block:
+    - name: Inspect the legacy container
+      ansible.builtin.command:
+        argv: [docker, container, inspect, "{{ container_name }}"]
+      register: legacy_container
+      changed_when: false
+      failed_when: >-
+        legacy_container.rc != 0 and
+        'No such container' not in legacy_container.stderr and
+        'No such object' not in legacy_container.stderr
+
+    - name: Confirm ownership and port before retiring the legacy container
+      ansible.builtin.assert:
+        that:
+          - (legacy_container.stdout | from_json)[0].Config.Labels['owner'] | default('') == member
+          - (legacy_container.stdout | from_json)[0].HostConfig.PortBindings['8080/tcp'][0].HostPort == '20003'
+      when: legacy_container.rc == 0
+
+    - name: Remove the inactive legacy blue container
+      ansible.builtin.command:
+        argv: [docker, rm, --force, "{{ container_name }}"]
+      when: legacy_container.rc == 0
+      changed_when: true
+
+- name: Inspect only the candidate slot container
   ansible.builtin.command:
-    argv: [docker, container, inspect, "{{ container_name }}"]
+    argv: [docker, container, inspect, "{{ candidate_name }}"]
   register: existing_container
   changed_when: false
   failed_when: >-
@@ -65,25 +110,18 @@
     'No such container' not in existing_container.stderr and
     'No such object' not in existing_container.stderr
 
-- name: Refuse to replace a container without our ownership label
+- name: Refuse to replace a container without our ownership and slot labels
   ansible.builtin.assert:
     that:
       - (existing_container.stdout | from_json)[0].Config.Labels['owner'] | default('') == member
+      - (existing_container.stdout | from_json)[0].Config.Labels['deployment_slot'] | default('') == deployment_slot
+      - (existing_container.stdout | from_json)[0].HostConfig.PortBindings['8080/tcp'][0].HostPort | int == candidate_port | int
   when: existing_container.rc == 0
 
-- name: Check whether a replacement is needed
-  ansible.builtin.set_fact:
-    replace_container: >-
-      {{ existing_container.rc != 0 or
-        (existing_container.stdout | from_json)[0].Config.Image != image_ref or
-        ('INSTANCE_ID=' ~ inventory_hostname) not in (existing_container.stdout | from_json)[0].Config.Env or
-        ('DEPLOYMENT_SLOT=' ~ deployment_slot) not in (existing_container.stdout | from_json)[0].Config.Env or
-        not (existing_container.stdout | from_json)[0].State.Running }}
-
-- name: Remove only our previous container
+- name: Remove only our inactive slot container
   ansible.builtin.command:
-    argv: [docker, rm, --force, "{{ container_name }}"]
-  when: existing_container.rc == 0 and replace_container | bool
+    argv: [docker, rm, --force, "{{ candidate_name }}"]
+  when: existing_container.rc == 0
   changed_when: true
 
 - name: Start the new application
@@ -93,33 +131,38 @@
       - run
       - --detach
       - --name
-      - "{{ container_name }}"
+      - "{{ candidate_name }}"
       - --label
       - "owner={{ member }}"
+      - --label
+      - "deployment_slot={{ deployment_slot }}"
       - --restart
       - unless-stopped
       - --publish
-      - "{{ app_port }}:{{ container_port }}"
+      - "{{ candidate_port }}:{{ container_port }}"
       - --env
       - "INSTANCE_ID={{ inventory_hostname }}"
       - --env
       - "DEPLOYMENT_SLOT={{ deployment_slot }}"
       - "{{ image_ref }}"
-  when: replace_container | bool
   changed_when: true
 
 - name: Wait for a healthy application
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ app_port }}/health"
+    url: "http://127.0.0.1:{{ candidate_port }}/health"
+    use_proxy: false
+    timeout: 5
     return_content: true
   register: health
-  until: health.status == 200 and (health.json.status | default('')) == 'ok'
+  until: health.status | default(0) == 200 and (health.json.status | default('')) == 'ok'
   retries: 15
   delay: 2
 
 - name: Read deployed version
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ app_port }}/version"
+    url: "http://127.0.0.1:{{ candidate_port }}/version"
+    use_proxy: false
+    timeout: 5
     return_content: true
   register: version_response
 
@@ -131,3 +174,7 @@
       - version_response.json.revision == git_revision
       - version_response.json.instance == inventory_hostname
       - version_response.json.slot == deployment_slot
+
+- name: Record that this server passed candidate checks in this run
+  ansible.builtin.set_fact:
+    candidate_ready_release: "{{ release_id }}"

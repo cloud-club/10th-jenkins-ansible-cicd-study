@@ -1,5 +1,17 @@
 ---
-- name: Deploy the same image to Dongwook's three app servers
+- name: Discover the active slot before changing any containers
+  hosts: load_balancers
+  become: true
+  become_user: root
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read the current Nginx configuration and running release
+      ansible.builtin.import_role:
+        name: nginx
+        tasks_from: discover
+
+- name: Prepare the inactive slot on all three app servers
   hosts: app_servers
   become: true
   become_user: root
@@ -9,7 +21,7 @@
   roles:
     - app
 
-- name: Deploy Dongwook's Nginx configuration after the app servers
+- name: Switch traffic only after all three candidates are ready
   hosts: load_balancers
   become: true
   become_user: root

@@ -5,17 +5,8 @@ pipeline {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
         timestamps()
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 60, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10'))
-    }
-
-    parameters {
-        string(
-            name: 'APP_VERSION',
-            defaultValue: 'v1',
-            trim: true,
-            description: '응답에 표시할 버전 (예: v1, v2, 1.0.0)'
-        )
     }
 
     environment {
@@ -29,30 +20,22 @@ pipeline {
                 // CI: 소스 확인, Python 테스트, 이미지 빌드와 실행 검증
                 stage('Checkout') {
                     steps {
+                        dir(env.PROJECT_DIR) {
+                            // Remove metadata left by an interrupted build before archiving anything.
+                            sh '''
+                                mkdir -p .artifacts
+                                rm -f .artifacts/deploy-vars.json .artifacts/image-inspect.json
+                                rm -rf .artifacts/availability
+                            '''
+                        }
                         checkout scm
                         script {
-                            if (!(params.APP_VERSION ==~ /[A-Za-z0-9][A-Za-z0-9_.-]{0,39}/)) {
-                                error('APP_VERSION은 영문/숫자로 시작하는 1~40자의 영문, 숫자, _, ., - 값이어야 합니다.')
-                            }
-                            env.APP_VERSION = params.APP_VERSION
                             env.GIT_REVISION = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-                            env.RELEASE_ID = "${params.APP_VERSION}-${env.GIT_REVISION.take(12)}-${env.BUILD_NUMBER}"
-                        }
-
-                        withCredentials([
-                            usernamePassword(
-                                credentialsId: 'dockerhub-credentials',
-                                usernameVariable: 'DOCKERHUB_USERNAME',
-                                passwordVariable: 'DOCKERHUB_TOKEN'
-                            )
-                        ]) {
-                            script {
-                                if (!(env.DOCKERHUB_USERNAME ==~ /[a-z0-9][a-z0-9_-]*/)) {
-                                    error('dockerhub-credentials의 Username에는 Docker Hub ID를 입력하세요.')
-                                }
-                                env.IMAGE_REPOSITORY = "${env.DOCKERHUB_USERNAME}/${env.DOCKERHUB_REPOSITORY}"
-                                env.IMAGE_TAG = "${env.IMAGE_REPOSITORY}:${env.RELEASE_ID}"
-                            }
+                            env.APP_VERSION = "git-${env.GIT_REVISION.take(12)}"
+                            env.RELEASE_ID = "${env.APP_VERSION}-${env.BUILD_NUMBER}"
+                            // Registry credentials are bound only during the CD stages.
+                            env.IMAGE_TAG = "dongwook-app-ci:${env.RELEASE_ID}-${env.EXECUTOR_NUMBER}"
+                            currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.APP_VERSION}"
                         }
                     }
                 }
@@ -66,6 +49,19 @@ pipeline {
                                 .venv/bin/python -m pip install --disable-pip-version-check \
                                     -r app/requirements.txt
                                 (cd app && ../.venv/bin/python -m unittest discover -s tests -v)
+                                .venv/bin/python -m unittest discover -s scripts/tests -v
+                            '''
+                        }
+                    }
+                }
+
+                stage('Validate Ansible') {
+                    steps {
+                        dir(env.PROJECT_DIR) {
+                            sh '''
+                                export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
+                                ansible-playbook -i ansible/inventory/hosts.yml \
+                                    ansible/playbooks/deploy.yml --syntax-check
                             '''
                         }
                     }
@@ -98,7 +94,7 @@ pipeline {
 
         stage('CD') {
             stages {
-                // CD: 검증한 이미지를 게시하고 App 서버와 Nginx에 배포한 뒤 응답 확인
+                // CD: Job의 SCM 브랜치에서 검증한 digest를 승인 후 비활성 슬롯에 배포
                 stage('Push Image') {
                     steps {
                         withCredentials([
@@ -108,6 +104,13 @@ pipeline {
                                 passwordVariable: 'DOCKERHUB_TOKEN'
                             )
                         ]) {
+                            script {
+                                if (!(env.DOCKERHUB_USERNAME ==~ /[a-z0-9][a-z0-9_-]*/)) {
+                                    error('dockerhub-credentials의 Username에는 Docker Hub ID를 입력하세요.')
+                                }
+                                env.IMAGE_REPOSITORY = "${env.DOCKERHUB_USERNAME}/${env.DOCKERHUB_REPOSITORY}"
+                                env.PUBLISHED_IMAGE_TAG = "${env.IMAGE_REPOSITORY}:${env.RELEASE_ID}"
+                            }
                             dir(env.PROJECT_DIR) {
                                 sh '''
                                     set -eu
@@ -118,8 +121,9 @@ pipeline {
                                     trap 'rm -rf "$DOCKER_CONFIG"' EXIT
                                     printf '%s' "$DOCKERHUB_TOKEN" | docker login \
                                         --username "$DOCKERHUB_USERNAME" --password-stdin
-                                    docker push "$IMAGE_TAG"
-                                    docker image inspect "$IMAGE_TAG" \
+                                    docker tag "$IMAGE_TAG" "$PUBLISHED_IMAGE_TAG"
+                                    docker push "$PUBLISHED_IMAGE_TAG"
+                                    docker image inspect "$PUBLISHED_IMAGE_TAG" \
                                         > .artifacts/image-inspect.json
                                     python3 scripts/write-deploy-vars.py
                                 '''
@@ -128,7 +132,19 @@ pipeline {
                     }
                 }
 
-                stage('Deploy App + Nginx') {
+                stage('Approve Production') {
+                    steps {
+                        dir(env.PROJECT_DIR) {
+                            archiveArtifacts artifacts: '.artifacts/deploy-vars.json', fingerprint: true
+                        }
+                        timeout(time: 15, unit: 'MINUTES') {
+                            input message: "운영 배포: ${env.RELEASE_ID}. Artifact의 이미지 digest를 확인하세요.",
+                            ok: '블루그린 배포'
+                        }
+                    }
+                }
+
+                stage('Deploy Blue Green') {
                     steps {
                         withCredentials([
                             usernamePassword(
@@ -145,24 +161,15 @@ pipeline {
                                     ansible-inventory -i ansible/inventory/hosts.yml --graph
                                     ansible-playbook -i ansible/inventory/hosts.yml \
                                         ansible/playbooks/deploy.yml --list-hosts
-                                    ansible-playbook -i ansible/inventory/hosts.yml \
-                                        ansible/playbooks/deploy.yml \
-                                        --extra-vars @.artifacts/deploy-vars.json
+                                    # Sample HTTP continuously before, during and after the deployment.
+                                    python3 scripts/monitor_deployment.py \
+                                        --expected-file .artifacts/deploy-vars.json \
+                                        --output-dir .artifacts/availability \
+                                        -- ansible-playbook -i ansible/inventory/hosts.yml \
+                                            ansible/playbooks/deploy.yml \
+                                            --extra-vars @.artifacts/deploy-vars.json
                                 '''
                             }
-                        }
-                    }
-                }
-
-                stage('Verify') {
-                    steps {
-                        dir(env.PROJECT_DIR) {
-                            sh '''
-                                # Agent가 접근 가능한 Nginx 주소를 통해 배포 결과를 확인한다.
-                                python3 scripts/verify.py \
-                                    --version "$APP_VERSION" \
-                                    --release "$RELEASE_ID"
-                            '''
                         }
                     }
                 }
@@ -174,7 +181,7 @@ pipeline {
         always {
             dir(env.PROJECT_DIR) {
                 archiveArtifacts(
-                    artifacts: '.artifacts/deploy-vars.json',
+                    artifacts: '.artifacts/deploy-vars.json,.artifacts/availability/*.json,.artifacts/availability/*.jsonl',
                     allowEmptyArchive: true
                 )
 
@@ -186,6 +193,7 @@ pipeline {
                         docker rm -f "$(cat .artifacts/test-container)" >/dev/null 2>&1 || true
                     fi
                     rm -f .artifacts/test-container .artifacts/image-inspect.json .artifacts/deploy-vars.json
+                    if [ -n "${PUBLISHED_IMAGE_TAG:-}" ]; then docker image rm "$PUBLISHED_IMAGE_TAG" || true; fi
                     if [ -n "${IMAGE_TAG:-}" ]; then docker image rm "$IMAGE_TAG" || true; fi
                 '''
             }

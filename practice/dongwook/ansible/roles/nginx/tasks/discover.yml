@@ -1,0 +1,68 @@
+---
+- name: Validate the shared server deployment scope
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+      - member == 'dongwook'
+      - container_name == 'dongwook-app'
+      - slot_ports == {'blue':20003, 'green':21003}
+      - nginx_port | int == 18003
+      - nginx_upstream == 'dongwook_backend'
+      - nginx_config_path == '/etc/nginx/conf.d/dongwook.conf'
+      - groups['load_balancers'] == ['dongwook_lb']
+      - ansible_host == '1.201.116.156'
+      - groups['app_servers'] | sort == ['dongwook_app1', 'dongwook_app2', 'dongwook_app3']
+      - groups['app_servers'] | map('extract', hostvars, 'ansible_host') | sort == ['1.201.118.10', '1.201.118.202', '1.201.118.90']
+    fail_msg: This playbook requires the complete existing Dongwook deployment; do not use --limit or --check.
+
+- name: Validate the existing Nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Read the existing configuration for discovery and rollback
+  ansible.builtin.slurp:
+    src: "{{ nginx_config_path }}"
+  register: previous_nginx_config
+
+- name: Determine slots from the three upstream addresses
+  ansible.builtin.command:
+    argv: "{{ ['python3', playbook_dir ~ '/../../scripts/deployment_state.py', '--upstream', nginx_upstream, '--hosts'] + (groups['app_servers'] | map('extract', hostvars, 'ansible_host') | list) }}"
+    stdin: "{{ previous_nginx_config.content | b64decode }}"
+  delegate_to: localhost
+  become: false
+  register: discovered_slots
+  changed_when: false
+
+- name: Remember the active and candidate slots for this deployment
+  ansible.builtin.set_fact:
+    active_slot: "{{ (discovered_slots.stdout | from_json).active_slot }}"
+    target_slot: "{{ (discovered_slots.stdout | from_json).target_slot }}"
+
+- name: Read the release currently served by Nginx
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ nginx_port }}/version"
+    use_proxy: false
+    return_content: true
+    timeout: 5
+  register: previous_release
+
+- name: Refuse to deploy when the running slot and configuration disagree
+  ansible.builtin.assert:
+    that:
+      - previous_release.json.service == container_name
+      - previous_release.json.slot == active_slot or (active_slot == 'blue' and previous_release.json.slot == 'primary')
+      - previous_release.json.release | length > 0
+      - previous_release.json.version | length > 0
+      - previous_release.json.revision | length > 0
+    fail_msg: Check for an unfinished Nginx reload or deployment before proceeding.
+
+- name: Verify the current release and all backends before reusing an inactive slot
+  ansible.builtin.command:
+    argv: "{{ ['python3', playbook_dir ~ '/../../scripts/verify.py', '--base-url', 'http://' ~ hostvars[inventory_hostname].ansible_host ~ ':' ~ (nginx_port | string), '--version', previous_release.json.version, '--release', previous_release.json.release, '--revision', previous_release.json.revision, '--slot', previous_release.json.slot, '--instances'] + groups['app_servers'] }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Report the traffic switch planned for this release
+  ansible.builtin.debug:
+    msg: "{{ active_slot }}:{{ slot_ports[active_slot] }} -> {{ target_slot }}:{{ slot_ports[target_slot] }}"

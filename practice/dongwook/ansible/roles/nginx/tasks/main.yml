@@ -1,18 +1,128 @@
 ---
-- name: Deploy Dongwook's Nginx configuration
-  ansible.builtin.template:
-    src: dongwook.conf.j2
-    dest: /etc/nginx/conf.d/dongwook.conf
+- name: Require a successful candidate check on every app server in this run
+  ansible.builtin.assert:
+    that:
+      - hostvars[item].candidate_ready_release | default('') == release_id
+      - hostvars[item].deployment_slot | default('') == target_slot
+  loop: "{{ groups['app_servers'] }}"
+
+# These requests originate at Nginx, so they also check the LB-to-app firewall path.
+- name: Check every candidate health endpoint from the load balancer
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ slot_ports[target_slot] }}/health"
+    use_proxy: false
+    timeout: 5
+    return_content: true
+  loop: "{{ groups['app_servers'] }}"
+  register: candidate_health
+  until: >-
+    candidate_health.status | default(0) == 200 and
+    candidate_health.json.status | default('') == 'ok' and
+    candidate_health.json.release | default('') == release_id and
+    candidate_health.json.version | default('') == app_version and
+    candidate_health.json.revision | default('') == git_revision and
+    candidate_health.json.instance | default('') == item and
+    candidate_health.json.slot | default('') == target_slot
+  retries: 5
+  delay: 2
+
+- name: Check every candidate version endpoint from the load balancer
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ slot_ports[target_slot] }}/version"
+    use_proxy: false
+    timeout: 5
+    return_content: true
+  loop: "{{ groups['app_servers'] }}"
+  register: candidate_versions
+
+- name: Validate all candidate identities before touching Nginx
+  ansible.builtin.assert:
+    that:
+      - item.json.service == container_name
+      - item.json.version == app_version
+      - item.json.release == release_id
+      - item.json.revision == git_revision
+      - item.json.instance == item.item
+      - item.json.slot == target_slot
+  loop: "{{ candidate_versions.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Check for configuration changes since discovery
+  ansible.builtin.slurp:
+    src: "{{ nginx_config_path }}"
+  register: current_nginx_config
+
+- name: Refuse to overwrite a concurrent configuration change
+  ansible.builtin.assert:
+    that:
+      - current_nginx_config.content == previous_nginx_config.content
+
+- name: Save the exact previous configuration outside the conf include pattern
+  ansible.builtin.copy:
+    content: "{{ previous_nginx_config.content | b64decode }}"
+    dest: "{{ nginx_config_path }}.previous"
     mode: '0644'
-  register: nginx_config
 
-- name: Validate Nginx configuration
-  ansible.builtin.command: nginx -t
-  changed_when: false
-  when: nginx_config.changed
+- name: Switch traffic and verify through the real entry point
+  block:
+    - name: Render all three backends on the candidate port
+      ansible.builtin.template:
+        src: dongwook.conf.j2
+        dest: "{{ nginx_config_path }}"
+        mode: '0644'
+      register: nginx_candidate_config
 
-- name: Reload Nginx
-  ansible.builtin.service:
-    name: nginx
-    state: reloaded
-  when: nginx_config.changed
+    - name: Validate the complete Nginx configuration before reload
+      ansible.builtin.command: nginx -t
+      changed_when: nginx_candidate_config.changed
+      notify: Reload Dongwook Nginx
+
+    - name: Run the notified reload before verifying traffic
+      ansible.builtin.meta: flush_handlers
+
+    # Handler errors are checked here so this task block owns rollback.
+    - name: Require the Nginx reload handler to succeed
+      ansible.builtin.assert:
+        that:
+          - nginx_reload_result is defined
+          - nginx_reload_result is succeeded
+        fail_msg: Nginx reload failed; restore the previous configuration.
+
+    - name: Verify release and all backends through Nginx from the Jenkins Agent
+      ansible.builtin.command:
+        argv: "{{ ['python3', playbook_dir ~ '/../../scripts/verify.py', '--base-url', 'http://' ~ hostvars[inventory_hostname].ansible_host ~ ':' ~ (nginx_port | string), '--version', app_version, '--release', release_id, '--revision', git_revision, '--slot', target_slot, '--instances'] + groups['app_servers'] }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+  rescue:
+    - name: Restore the configuration captured before this deployment
+      ansible.builtin.copy:
+        content: "{{ previous_nginx_config.content | b64decode }}"
+        dest: "{{ nginx_config_path }}"
+        mode: '0644'
+
+    - name: Validate the restored configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Reload Nginx back onto the previous slot
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+    - name: Verify the previous release through Nginx from the Jenkins Agent
+      ansible.builtin.command:
+        argv: "{{ ['python3', playbook_dir ~ '/../../scripts/verify.py', '--base-url', 'http://' ~ hostvars[inventory_hostname].ansible_host ~ ':' ~ (nginx_port | string), '--version', previous_release.json.version, '--release', previous_release.json.release, '--revision', previous_release.json.revision, '--slot', previous_release.json.slot, '--instances'] + groups['app_servers'] }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+    - name: Mark deployment failed even after successful rollback
+      ansible.builtin.fail:
+        msg: "Traffic restored to {{ active_slot }}. Deployment failed at: {{ ansible_failed_task.name }}. Inspect candidate logs before retrying."
+
+- name: Report the active release and retained rollback slot
+  ansible.builtin.debug:
+    msg: "Active={{ target_slot }}:{{ slot_ports[target_slot] }}, release={{ release_id }}. Previous {{ active_slot }} containers remain running."
