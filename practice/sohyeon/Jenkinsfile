@@ -1,252 +1,229 @@
-// Docker 이미지 빌드·테스트와 Ansible 배포·검증 파이프라인
+// 파일 역할: 테스트·이미지 빌드와 검사·Ansible 배포 실행·가용성 측정·결과 보관을 Jenkins에서 순서대로 관리한다.
+// Jenkins: 빌드·이미지 검사·Ansible 실행·가용성 측정·증거 보관.
+// Ansible: 원격 사전 검사와 서버별 Rolling 배포·Nginx 제어·배포 후 검사.
 pipeline {
-    agent {
-        label 'ansible-agent'
-    }
-
+    // 배포 도구와 Docker 권한이 준비된 Jenkins Agent에서 실행한다.
+    agent { label 'ansible-agent' }
+    // 같은 job의 중복 배포를 막고 콘솔 시각과 전체 실행 제한 시간을 설정한다.
     options {
         disableConcurrentBuilds()
+        buildDiscarder(logRotator(daysToKeepStr: '30', numToKeepStr: '20'))
         timestamps()
+        timeout(time: 30, unit: 'MINUTES')
     }
-
+    // 배포 버전과 기존 Week1 앱의 최초 전환 여부를 입력받는다.
     parameters {
-        booleanParam(
-            name: 'CONFIGURE_NGINX',
-            defaultValue: false,
-            description: '공용 Nginx의 sohyeon.conf를 설정/변경할 때만 활성화'
-        )
+        string(name: 'APP_VERSION', defaultValue: 'v2', description: '이미지에 기록할 버전. 기준 배포 v1, 다음 배포 v2')
+        booleanParam(name: 'BOOTSTRAP', defaultValue: false, description: '기존 Week1 앱을 개선 앱 v1으로 옮기는 최초 실행에만 사용')
     }
-
+    // 공통 작업 경로·이미지 이름·로그 출력 설정을 정의한다.
     environment {
-        // 공용 레포 루트 기준 프로젝트 경로
-        PROJECT_DIR = 'practice/sohyeon'
+        // 이 저장소는 Jenkinsfile과 ansible/이 checkout 루트에 있다.
+        PROJECT_DIR = '.'
         IMAGE_NAME = 'sohyeon-cicd-app'
-        TEST_CONTAINER = 'sohyeon-cicd-test'
-        // NGINX_URL = 'http://1.201.116.156:18007'
+        ANSIBLE_FORCE_COLOR = 'false'
+        DOCKER_HOST = 'unix:///var/run/docker.sock'
+        PYTHONUNBUFFERED = '1'
     }
-
     stages {
-
-        stage('Check Environment') {
+        // 입력값과 실행 환경을 확인하고 릴리스 식별자를 만든 뒤 로컬 테스트를 실행한다.
+        stage('Check & Unit Test') {
             steps {
                 dir(env.PROJECT_DIR) {
+                    script {
+                        def requiredFiles = ['ansible.cfg', 'ansible/requirements.yml',
+                                             'scripts/cleanup.py', 'scripts/cleanup_workspace.py']
+                        def missingFiles = requiredFiles.findAll { !fileExists(it) }
+                        if (missingFiles) {
+                            error("Project files missing in ${pwd()}: ${missingFiles.join(', ')}. Check PROJECT_DIR and the checked-out commit.")
+                        }
+                        env.PROJECT_READY = 'true'
+                        if (!(params.APP_VERSION ==~ /v[0-9]+/)) {
+                            error('APP_VERSION must be v followed by digits')
+                        }
+                        if (params.BOOTSTRAP && params.APP_VERSION != 'v1') {
+                            error('BOOTSTRAP is only for the initial v1 migration')
+                        }
+                        env.TMPDIR = "${pwd()}/.ansible/tmp"
+                        env.ANSIBLE_CONFIG = "${pwd()}/ansible.cfg"
+                        env.ANSIBLE_COLLECTIONS_PATH = "${pwd()}/.ansible/collections"
+                        env.GIT_REVISION = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                        env.RELEASE_ID = "${params.APP_VERSION}-${env.GIT_REVISION.take(12)}-${env.BUILD_NUMBER}"
+                        env.ARTIFACT_DIR = ".artifacts/${env.BUILD_NUMBER}"
+                    }
                     sh '''
-                        echo "=== Jenkins Agent ==="
-                        hostname
-                        whoami
-                        id
-                        pwd
-
-                        echo "=== Docker Socket ==="
-                        ls -l /var/run/docker.sock
-
-                        echo "=== Docker Group Test ==="
-                        sg docker -c "docker ps"
-
-                        echo "=== Required Tools ==="
-                        docker --version
-                        ansible --version
-                        git --version
-                        curl --version
-                        ssh -V
+                        set -eu
+                        mkdir -p "$TMPDIR"
+                        python3 --version
+                        ansible-playbook --version
+                        ansible-galaxy collection install -r ansible/requirements.yml -p .ansible/collections
+                        python3 scripts/check_collections.py
+                        sg docker -c 'docker info >/dev/null'
+                        python3 -m unittest discover -s tests -v
+                        mkdir -p "$ARTIFACT_DIR"
                     '''
                 }
             }
         }
-
-
-        stage('Build') {
+        // 버전 정보가 고정된 이미지를 빌드·검사하고 배포용 tar와 전달 변수를 준비한다.
+        stage('Build & Test Image') {
             steps {
                 dir(env.PROJECT_DIR) {
+                    script {
+                        env.TEST_CONTAINER = "sohyeon-cicd-test-${env.BUILD_NUMBER}"
+                    }
                     sh '''
-                        sg docker -c \
-                        "docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} ."
+                        set -eu
+                        sg docker -c "docker build --build-arg APP_VERSION=$APP_VERSION --build-arg RELEASE_ID=$RELEASE_ID --build-arg GIT_REVISION=$GIT_REVISION -t $IMAGE_NAME:$RELEASE_ID ."
+                        sg docker -c "docker run -d --name $TEST_CONTAINER --label io.sohyeon.project=sohyeon-cicd --label io.sohyeon.role=test -e SERVER_ID=image-test $IMAGE_NAME:$RELEASE_ID"
+                        sg docker -c "docker exec -i $TEST_CONTAINER python - $RELEASE_ID $APP_VERSION" < scripts/check_image.py
+                        sg docker -c "python3 scripts/cleanup.py test-cleanup --container $TEST_CONTAINER --release $RELEASE_ID"
+                        sg docker -c "docker save -o $ARTIFACT_DIR/image.tar $IMAGE_NAME:$RELEASE_ID"
+                        sha256sum "$ARTIFACT_DIR/image.tar" > "$ARTIFACT_DIR/image.sha256"
+                        python3 - <<'PY'
+# Ansible에 전달할 이미지 정보와 bootstrap 설정을 JSON으로 기록한다.
+import json, os
+from pathlib import Path
+out = Path(os.environ['ARTIFACT_DIR'])
+data = dict(image_name=os.environ['IMAGE_NAME'], image_tag=os.environ['RELEASE_ID'],
+            app_version=os.environ['APP_VERSION'], image_tar=str((out / 'image.tar').resolve()),
+            bootstrap=os.environ['BOOTSTRAP'].lower() == 'true')
+(out / 'release.json').write_text(json.dumps(data, indent=2) + '\\n')
+PY
                     '''
                 }
             }
         }
-
-
-        stage('Test') {
+        // SSH 인증을 연결하고 Ansible에 서비스 사전 검사와 전 서버 이미지 준비를 맡긴다.
+        stage('Prepare Deployment') {
             steps {
-                dir(env.PROJECT_DIR) {
-                    sh '''
-                        echo "=== Test Docker Image ==="
-
-                        sg docker -c \
-                        "docker rm -f ${TEST_CONTAINER}" \
-                        2>/dev/null || true
-
-                        sg docker -c \
-                        "docker run -d \
-                        --name ${TEST_CONTAINER} \
-                        -e APP_VERSION=v${BUILD_NUMBER} \
-                        ${IMAGE_NAME}:${BUILD_NUMBER}"
-
-                        sleep 2
-
-                        HEALTH_RESULT=$(
-                        sg docker -c \
-                            "docker exec ${TEST_CONTAINER} \
-                            wget -qO- http://127.0.0.1/health"
-                        )
-
-                        VERSION_RESULT=$(
-                        sg docker -c \
-                            "docker exec ${TEST_CONTAINER} \
-                            wget -qO- http://127.0.0.1/version"
-                        )
-
-                        echo "health=${HEALTH_RESULT}"
-                        echo "version=${VERSION_RESULT}"
-
-                        test "${HEALTH_RESULT}" = "OK"
-                        test "${VERSION_RESULT}" = "v${BUILD_NUMBER}"
-
-                        sg docker -c \
-                        "docker rm -f ${TEST_CONTAINER}"
-                    '''
-                }
-            }
-        }
-
-
-        stage('Prepare Artifact') {
-            steps {
-                dir(env.PROJECT_DIR) {
-                    sh '''
-                        mkdir -p .artifacts
-
-                        sg docker -c \
-                        "docker save \
-                        -o .artifacts/${IMAGE_NAME}.tar \
-                        ${IMAGE_NAME}:${BUILD_NUMBER}"
-                    '''
-                }
-            }
-        }
-
-
-        stage('Prepare SSH') {
-            steps {
-                dir(env.PROJECT_DIR) {
-                    sh '''
-                        echo "=== Prepare Private known_hosts ==="
-
-                        ansible-playbook \
-                          -i ansible/inventory.ini \
-                          ansible/playbook/prepare_ssh.yml
-                    '''
-                }
-            }
-        }
-
-
-        stage('Deploy') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: 'sohyeon-deploy-ssh',
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
-                    )
-                ]) {
+                withCredentials([sshUserPrivateKey(credentialsId: 'sohyeon-deploy-ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
                     dir(env.PROJECT_DIR) {
-                        sh '''
-                            echo "=== Deploy to App Servers ==="
-
-                            export ANSIBLE_PRIVATE_KEY_FILE="${SSH_KEY}"
-                            export ANSIBLE_REMOTE_USER="${SSH_USER}"
-                            export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=${WORKSPACE}/${PROJECT_DIR}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
-
-                            ansible-playbook \
-                              -i ansible/inventory.ini \
-                              ansible/playbook/deploy.yml \
-                              --limit app_servers \
-                              -e "image_name=${IMAGE_NAME}" \
-                              -e "image_tag=${BUILD_NUMBER}" \
-                              -e "image_tar=${WORKSPACE}/${PROJECT_DIR}/.artifacts/${IMAGE_NAME}.tar"
-                        '''
+                        sh '''#!/bin/bash
+set -euo pipefail
+set +x
+export ANSIBLE_PRIVATE_KEY_FILE="$SSH_KEY"
+export ANSIBLE_REMOTE_USER="$SSH_USER"
+export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=$PWD/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+# 원격 접속에 사용할 호스트 키를 준비하고 측정 도구용 인벤토리를 저장한다.
+ansible-playbook -i ansible/inventory.ini ansible/playbook/prepare_ssh.yml
+ansible-inventory -i ansible/inventory.ini --list > "$ARTIFACT_DIR/inventory.json"
+# 파이프 실패 코드를 유지하면서 사전 검사·이미지 준비 로그를 저장한다.
+ansible-playbook -i ansible/inventory.ini ansible/playbook/prepare.yml -e "@$ARTIFACT_DIR/release.json" 2>&1 | tee "$ARTIFACT_DIR/prepare.log"
+'''
                     }
                 }
             }
         }
-
-
-        stage('Configure Nginx') {
-            when {
-                expression {
-                    return params.CONFIGURE_NGINX
-                }
-            }
-
+        // HTTP 측정을 유지한 채 Ansible의 서버별 Rolling 배포와 최종 검증을 실행한다.
+        stage('Rolling Deploy & Verify Availability') {
             steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: 'sohyeon-deploy-ssh',
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
-                    )
-                ]) {
+                withCredentials([sshUserPrivateKey(credentialsId: 'sohyeon-deploy-ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
                     dir(env.PROJECT_DIR) {
-                        sh '''
-                            echo "=== Configure Sohyeon Nginx ==="
-
-                            export ANSIBLE_PRIVATE_KEY_FILE="${SSH_KEY}"
-                            export ANSIBLE_REMOTE_USER="${SSH_USER}"
-                            export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=${WORKSPACE}/${PROJECT_DIR}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
-
-                            ansible-playbook \
-                              -i ansible/inventory.ini \
-                              ansible/playbook/nginx.yml \
-                              --limit load_balancer
-                        '''
+                        sh '''#!/bin/bash
+set -euo pipefail
+set +x
+export ANSIBLE_PRIVATE_KEY_FILE="$SSH_KEY"
+export ANSIBLE_REMOTE_USER="$SSH_USER"
+export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=$PWD/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+probe_options=()
+if [ "$BOOTSTRAP" = true ]; then probe_options+=(--bootstrap); fi
+# probe가 배포 전 30초 → Ansible 순차 배포 → 배포 후 60초 전체를 관측한다.
+python3 scripts/probe.py --inventory "$ARTIFACT_DIR/inventory.json" \\
+  --release "$RELEASE_ID" --version "$APP_VERSION" --output "$ARTIFACT_DIR" \\
+  "${probe_options[@]}" -- \\
+  ansible-playbook -i ansible/inventory.ini ansible/playbook/deploy.yml -e "@$ARTIFACT_DIR/release.json"
+'''
                     }
                 }
             }
         }
-
-
-        stage('Verify') {
+        // 성공한 배포의 증거와 삭제 목록을 먼저 보관한다.
+        stage('Cleanup Plan & Archive') {
             steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: 'sohyeon-deploy-ssh',
-                        keyFileVariable: 'SSH_KEY',
-                        usernameVariable: 'SSH_USER'
-                    )
-                ]) {
-                    dir(env.PROJECT_DIR) {
-                        sh '''
-                            echo "=== Verify Through Nginx ==="
-
-                            export ANSIBLE_PRIVATE_KEY_FILE="${SSH_KEY}"
-                            export ANSIBLE_REMOTE_USER="${SSH_USER}"
-                            export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=${WORKSPACE}/${PROJECT_DIR}/.ssh/known_hosts -o StrictHostKeyChecking=yes"
-
-                            ansible-playbook \
-                            -i ansible/inventory.ini \
-                            ansible/playbook/verify.yml \
-                            --limit load_balancer \
-                            -e "image_tag=${BUILD_NUMBER}"
-                        '''
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE', catchInterruptions: false) {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'sohyeon-deploy-ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+                        dir(env.PROJECT_DIR) {
+                            sh '''#!/bin/bash
+set -euo pipefail
+set +x
+export ANSIBLE_PRIVATE_KEY_FILE="$SSH_KEY"
+export ANSIBLE_REMOTE_USER="$SSH_USER"
+export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=$PWD/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+python3 -c 'import json,os; assert json.load(open(os.environ["ARTIFACT_DIR"] + "/summary.json"))["passed"] is True'
+ansible-playbook -i ansible/inventory.ini ansible/playbook/cleanup.yml \
+  -e "@$ARTIFACT_DIR/release.json" -e cleanup_mode=plan \
+  -e "cleanup_artifacts=$PWD/$ARTIFACT_DIR" 2>&1 | tee "$ARTIFACT_DIR/cleanup-plan.log"
+sg docker -c "python3 scripts/cleanup.py plan --scope agent --release $RELEASE_ID --protection-dir $ARTIFACT_DIR --plan $ARTIFACT_DIR/cleanup-plan-agent.json"
+'''
+                            archiveArtifacts artifacts: "${env.ARTIFACT_DIR}/*.log,${env.ARTIFACT_DIR}/availability.jsonl,${env.ARTIFACT_DIR}/summary.json,${env.ARTIFACT_DIR}/release.json,${env.ARTIFACT_DIR}/image.sha256,${env.ARTIFACT_DIR}/cleanup-plan-*.json", allowEmptyArchive: false
+                            script { env.CLEANUP_READY = 'true' }
+                        }
+                    }
+                }
+            }
+        }
+        stage('Cleanup Apply & Verify') {
+            when { expression { env.CLEANUP_READY == 'true' } }
+            steps {
+                // 정리 오류는 성공한 배포를 롤백하지 않고 별도 stage 실패로 기록한다.
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE', catchInterruptions: false) {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'sohyeon-deploy-ssh', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+                        dir(env.PROJECT_DIR) {
+                            sh '''#!/bin/bash
+set -euo pipefail
+set +x
+export ANSIBLE_PRIVATE_KEY_FILE="$SSH_KEY"
+export ANSIBLE_REMOTE_USER="$SSH_USER"
+export ANSIBLE_SSH_COMMON_ARGS="-o UserKnownHostsFile=$PWD/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+ansible-playbook -i ansible/inventory.ini ansible/playbook/cleanup.yml \
+  -e "@$ARTIFACT_DIR/release.json" -e cleanup_mode=apply \
+  -e "cleanup_artifacts=$PWD/$ARTIFACT_DIR" 2>&1 | tee "$ARTIFACT_DIR/cleanup-apply.log"
+sg docker -c "python3 scripts/cleanup.py apply --scope agent --release $RELEASE_ID --protection-dir $ARTIFACT_DIR --plan $ARTIFACT_DIR/cleanup-plan-agent.json --result $ARTIFACT_DIR/cleanup-result-agent.json"
+'''
+                        }
                     }
                 }
             }
         }
     }
-
-
+    // 배포 성공 여부와 관계없이 실행 결과를 보관하고 임시 자원을 정리한다.
     post {
+        // 빌드 결과와 수집된 요청·배포 로그를 Jenkins 아티팩트로 보관한다.
         always {
             dir(env.PROJECT_DIR) {
+                script {
+                    if (env.ARTIFACT_DIR && fileExists(env.ARTIFACT_DIR)) {
+                        writeFile file: "${env.ARTIFACT_DIR}/build-result.txt", text: "${currentBuild.currentResult}\n"
+                        // SSH 키와 inventory 전체는 아티팩트에 포함하지 않는다.
+                        archiveArtifacts artifacts: "${env.ARTIFACT_DIR}/*.log,${env.ARTIFACT_DIR}/availability.jsonl,${env.ARTIFACT_DIR}/summary.json,${env.ARTIFACT_DIR}/release.json,${env.ARTIFACT_DIR}/image.sha256,${env.ARTIFACT_DIR}/build-result.txt,${env.ARTIFACT_DIR}/cleanup-*.json", allowEmptyArchive: false
+                        // 이 표시는 실제 archive 성공 뒤에만 작성한다.
+                        writeFile file: "${env.ARTIFACT_DIR}/.archived", text: groovy.json.JsonOutput.toJson([owner: 'sohyeon', project: 'sohyeon-cicd', job: env.JOB_NAME])
+                    }
+                }
+            }
+        }
+        // 결과 보관 처리 후 해당 빌드의 테스트 컨테이너·tar·인증 임시 파일만 정리한다.
+        cleanup {
+            dir(env.PROJECT_DIR) {
+                // archive에 성공한 보고서 중복본만 정리하고 실패 시 원본은 보존한다.
                 sh '''
-                    sg docker -c \
-                    "docker rm -f ${TEST_CONTAINER}" \
-                    2>/dev/null || true
-
-                    rm -rf .artifacts
-                    rm -rf .ssh
+                    set +x
+                    if [ "${PROJECT_READY:-false}" != true ]; then
+                        echo 'Project validation did not finish; no build resources to clean.'
+                        exit 0
+                    fi
+                    cleanup_rc=0
+                    if [ -n "${TEST_CONTAINER:-}" ]; then
+                        sg docker -c "python3 scripts/cleanup.py test-cleanup --container $TEST_CONTAINER --release $RELEASE_ID" || cleanup_rc=$?
+                    fi
+                    if [ -n "${ARTIFACT_DIR:-}" ]; then
+                        rm -f "$ARTIFACT_DIR/image.tar" "$ARTIFACT_DIR/inventory.json"
+                    fi
+                    rm -f .ssh/known_hosts
+                    rmdir .ssh 2>/dev/null || true
+                    python3 scripts/cleanup_workspace.py || cleanup_rc=$?
+                    exit "$cleanup_rc"
                 '''
             }
         }

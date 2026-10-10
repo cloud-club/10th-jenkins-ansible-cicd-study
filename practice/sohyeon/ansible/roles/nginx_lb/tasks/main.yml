@@ -1,18 +1,66 @@
-# 개인 Nginx 설정 파일 배치 및 설정 문법 검사
+# 심소현의 conf.d/sohyeon.conf만 변경한다. 공용 nginx.conf와 다른 사용자 파일은 수정하지 않는다.
 ---
-- name: Deploy Sohyeon personal Nginx configuration
+- name: Enforce the assigned Nginx scope
+  ansible.builtin.assert:
+    that:
+      - nginx_config == '/etc/nginx/conf.d/sohyeon.conf'
+      - lb_port | int == 18007
+      - host_port | int == 20007
+      - excluded_hosts | length <= 1
+      - excluded_hosts | difference(['sohyeon-app1', 'sohyeon-app2', 'sohyeon-app3']) | length == 0
+      - groups['app_servers'] | sort == ['sohyeon-app1', 'sohyeon-app2', 'sohyeon-app3']
+      - hostvars['sohyeon-app1'].ansible_host == '1.201.118.202'
+      - hostvars['sohyeon-app2'].ansible_host == '1.201.118.10'
+      - hostvars['sohyeon-app3'].ansible_host == '1.201.118.90'
+
+- name: Render the candidate outside conf.d wildcard
   ansible.builtin.template:
     src: sohyeon.conf.j2
-    dest: /etc/nginx/conf.d/sohyeon.conf
-    owner: root
-    group: root
-    mode: "0644"
+    dest: /etc/nginx/sohyeon.candidate
+    mode: '0644'
   become: true
+  delegate_to: "{{ lb_host }}"
+
+- name: Record the exact candidate created by this deployment
+  ansible.builtin.command:
+    argv: [python3, "{{ remote_tools }}/cleanup.py", record, --scope, lb, --release, "{{ image_tag }}", --path, /etc/nginx/sohyeon.candidate]
+  become: false
+  delegate_to: "{{ lb_host }}"
+  changed_when: true
+
+- name: Validate the complete shared Nginx configuration with the candidate
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ remote_tools }}/nginx_candidate.py"
+      - /etc/nginx/sohyeon.candidate
+      - "{{ nginx_config }}"
+  become: true
+  delegate_to: "{{ lb_host }}"
+  changed_when: false
+
+- name: Install only the assigned project config atomically
+  ansible.builtin.copy:
+    src: /etc/nginx/sohyeon.candidate
+    dest: "{{ nginx_config }}"
+    remote_src: true
+    mode: '0644'
+    backup: true
+  register: nginx_install
+  become: true
+  delegate_to: "{{ lb_host }}"
   notify: Reload Nginx
 
-
-- name: Validate Nginx configuration
+- name: Record only the backup returned by this configuration replacement
   ansible.builtin.command:
-    cmd: nginx -t
+    argv: [python3, "{{ remote_tools }}/cleanup.py", record, --scope, lb, --release, "{{ image_tag }}", --path, "{{ nginx_install.backup_file }}"]
+  become: false
+  delegate_to: "{{ lb_host }}"
+  when: nginx_install.backup_file is defined
+  changed_when: true
+
+- name: Validate the installed complete configuration
+  ansible.builtin.command: nginx -t
   become: true
+  delegate_to: "{{ lb_host }}"
   changed_when: false

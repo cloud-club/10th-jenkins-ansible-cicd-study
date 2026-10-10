@@ -1,0 +1,35 @@
+# Only invoked after successful deployment, observation and evidence archival.
+---
+- ansible.builtin.import_playbook: verify.yml
+
+- name: Clean application servers one at a time
+  hosts: app_servers
+  gather_facts: false
+  become: false
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/cleanup"
+      vars:
+        cleanup_scope: app
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/verification"
+      vars:
+        check_host: "{{ inventory_hostname }}"
+        check_from: "{{ lb_host }}"
+        check_url: "http://{{ hostvars[inventory_hostname].ansible_host }}:{{ host_port }}"
+        expected_release: "{{ image_tag }}"
+
+- name: Clean completed Nginx deployment files
+  hosts: load_balancer
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/cleanup"
+      vars:
+        cleanup_scope: lb
+
+- ansible.builtin.import_playbook: verify.yml
