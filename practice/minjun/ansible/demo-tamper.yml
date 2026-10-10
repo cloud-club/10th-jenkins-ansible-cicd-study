@@ -1,0 +1,50 @@
+---
+# 시연 전용 (Jenkins 파라미터 DEMO_TAMPER로만 실행): 대상 서버에 "같은 태그, 다른 내용" 이미지를 심는다.
+# 이번에 배포할 태그(minjun-app:<tag>)를 누군가 먼저 차지해 두는 상황을 흉내 낸다.
+# 내용은 정상 앱과 같고 라벨(demo.tampered=true)만 다르다 → 이미지 ID가 달라진다.
+# 1주차 app Role이었다면 "태그가 이미 있음 → 로드 생략 → 이 이미지로 컨테이너 실행"이 됐다.
+
+- name: Plant a tampered image under the deploy tag
+  hosts: app
+  become: true
+  gather_facts: false
+  vars:
+    stage_path: "/opt/{{ owner }}/images/tampered.tar.gz"
+  tasks:
+    - name: Ensure staging dir
+      ansible.builtin.file:
+        path: "{{ stage_path | dirname }}"
+        state: directory
+        mode: "0750"
+
+    - name: Copy tampered archive
+      ansible.builtin.copy:
+        src: "{{ tampered_archive }}"
+        dest: "{{ stage_path }}"
+        mode: "0640"
+
+    - name: Load tampered image
+      community.docker.docker_image_load:
+        path: "{{ stage_path }}"
+
+    - name: Put it under the deploy tag
+      ansible.builtin.command: docker tag {{ app_image }}:tampered-{{ image_tag }} {{ app_image }}:{{ image_tag }}
+
+    - name: Drop the helper tag (image stays under the deploy tag)
+      ansible.builtin.command: docker image rm {{ app_image }}:tampered-{{ image_tag }}
+
+    - name: Remove archive
+      ansible.builtin.file:
+        path: "{{ stage_path }}"
+        state: absent
+
+    - name: What the deploy tag points to now
+      community.docker.docker_image_info:
+        name: "{{ app_image }}:{{ image_tag }}"
+      register: planted
+
+    - name: Show
+      ansible.builtin.debug:
+        msg: >-
+          planted {{ app_image }}:{{ image_tag }} → {{ planted.images[0].Id }}
+          labels={{ planted.images[0].Config.Labels }}
