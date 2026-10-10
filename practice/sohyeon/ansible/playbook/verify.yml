@@ -1,0 +1,34 @@
+# Nginx를 통한 앱 상태와 배포 버전 검증
+---
+- name: Verify Sohyeon deployment through Nginx
+  hosts: load_balancer
+  gather_facts: false
+
+  tasks:
+    - name: Check health through Nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:18007/health"
+        status_code: 200
+        return_content: true
+      register: health_response
+
+    - name: Verify health response
+      ansible.builtin.assert:
+        that:
+          - health_response.content | trim == "OK"
+        fail_msg: "Nginx health check failed"
+        success_msg: "Nginx health check passed"
+
+    - name: Check version through Nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:18007/version"
+        status_code: 200
+        return_content: true
+      register: version_response
+
+    - name: Verify deployed version
+      ansible.builtin.assert:
+        that:
+          - version_response.content | trim == ('v' ~ image_tag)
+        fail_msg: "Unexpected version through Nginx"
+        success_msg: "Version v{{ image_tag }} verified through Nginx"

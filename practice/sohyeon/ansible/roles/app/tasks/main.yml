@@ -1,0 +1,88 @@
+# Docker 이미지 전송·로드, 컨테이너 교체 및 상태·버전 검증
+---
+- name: Validate deployment variables
+  ansible.builtin.assert:
+    that:
+      - image_tar | length > 0
+      - image_tag | length > 0
+    fail_msg: "image_tar and image_tag must be provided by Jenkins."
+
+
+- name: Copy Sohyeon Docker image
+  ansible.builtin.copy:
+    src: "{{ image_tar }}"
+    dest: "/tmp/{{ app_name }}-{{ image_tag }}.tar"
+    mode: "0644"
+
+
+- name: Load Sohyeon Docker image
+  ansible.builtin.command:
+    cmd: "docker load -i /tmp/{{ app_name }}-{{ image_tag }}.tar"
+  become: true
+  register: docker_load_result
+  changed_when: >
+    'Loaded image' in docker_load_result.stdout
+    or
+    'Loaded image ID' in docker_load_result.stdout
+
+
+- name: Check existing Sohyeon container
+  ansible.builtin.command:
+    cmd: "docker ps -a -q -f name=^{{ app_name }}$"
+  become: true
+  register: existing_container
+  changed_when: false
+
+
+- name: Remove existing Sohyeon container
+  ansible.builtin.command:
+    cmd: "docker rm -f {{ app_name }}"
+  become: true
+  when: existing_container.stdout | length > 0
+
+
+- name: Run Sohyeon application container
+  ansible.builtin.command:
+    cmd: >
+      docker run -d
+      --name {{ app_name }}
+      --restart unless-stopped
+      -e APP_VERSION=v{{ image_tag }}
+      -p {{ host_port }}:{{ container_port }}
+      {{ image_name }}:{{ image_tag }}
+  become: true
+
+
+- name: Wait for Sohyeon application health check
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ host_port }}/health"
+    status_code: 200
+    return_content: true
+  register: health_response
+  retries: 10
+  delay: 2
+  until:
+    - health_response.status == 200
+    - health_response.content | trim == "OK" 
+
+
+- name: Check deployed application version
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ host_port }}/version"
+    status_code: 200
+    return_content: true
+  register: version_response
+
+
+- name: Verify deployed application version
+  ansible.builtin.assert:
+    that:
+      - version_response.content | trim == ('v' ~ image_tag)
+    fail_msg: "Unexpected deployed version on {{ inventory_hostname }}"
+    success_msg: "Version v{{ image_tag }} deployed on {{ inventory_hostname }}"
+
+
+- name: Remove temporary Docker image tar
+  ansible.builtin.file:
+    path: "/tmp/{{ app_name }}-{{ image_tag }}.tar"
+    state: absent

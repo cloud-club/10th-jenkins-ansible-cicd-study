@@ -1,0 +1,37 @@
+# Jenkins Agent에서 인벤토리 서버의 SSH 호스트 키 준비
+---
+- name: Prepare private SSH known_hosts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    ssh_directory: "{{ playbook_dir }}/../../.ssh"
+    ssh_hosts: "{{ (groups['app_servers'] + groups['load_balancer']) | unique | list }}"
+
+  tasks:
+    - name: Create private SSH directory
+      ansible.builtin.file:
+        path: "{{ ssh_directory }}"
+        state: directory
+        mode: "0700"
+
+    - name: Scan inventory SSH host keys
+      ansible.builtin.command:
+        argv:
+          - ssh-keyscan
+          - -H
+          - -T
+          - "10"
+          - -p
+          - "{{ hostvars[item]['ansible_port'] | default(22) | string }}"
+          - "{{ hostvars[item]['ansible_host'] | default(item) }}"
+      loop: "{{ ssh_hosts }}"
+      register: ssh_keyscan
+      changed_when: false
+
+    - name: Write private known_hosts
+      ansible.builtin.copy:
+        dest: "{{ ssh_directory }}/known_hosts"
+        content: "{{ ssh_keyscan.results | map(attribute='stdout') | join('\n') }}\n"
+        mode: "0600"
