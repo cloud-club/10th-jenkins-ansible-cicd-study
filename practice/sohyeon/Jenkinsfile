@@ -19,7 +19,8 @@ pipeline {
     // 공통 작업 경로·이미지 이름·로그 출력 설정을 정의한다.
     environment {
         // 이 저장소는 Jenkinsfile과 ansible/이 checkout 루트에 있다.
-        PROJECT_DIR = '.'
+        // PROJECT_DIR = '.'
+        PROJECT_DIR = 'practice/sohyeon'
         IMAGE_NAME = 'sohyeon-cicd-app'
         ANSIBLE_FORCE_COLOR = 'false'
         DOCKER_HOST = 'unix:///var/run/docker.sock'
