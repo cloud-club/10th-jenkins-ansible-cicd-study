@@ -45,7 +45,17 @@ pipeline {
                         if (params.BOOTSTRAP && params.APP_VERSION != 'v1') {
                             error('BOOTSTRAP is only for the initial v1 migration')
                         }
-                        env.TMPDIR = "${pwd()}/.ansible/tmp"
+                        // Python multiprocessing의 Unix 소켓 경로 길이 제한을 피한다.
+                        // 소유 프로젝트를 표시하고 빌드마다 독립된 0700 디렉터리를 만든다.
+                        env.BUILD_TMPDIR = sh(
+                            script: 'mktemp -d /tmp/sohyeon-ci.XXXXXXXX',
+                            returnStdout: true
+                        ).trim()
+                        env.TMPDIR = env.BUILD_TMPDIR
+                        writeFile file: "${env.BUILD_TMPDIR}/build-info.json", text: groovy.json.JsonOutput.toJson([
+                            owner: 'sohyeon', project: 'sohyeon-cicd',
+                            job: env.JOB_NAME, build: env.BUILD_NUMBER
+                        ])
                         env.ANSIBLE_CONFIG = "${pwd()}/ansible.cfg"
                         env.ANSIBLE_COLLECTIONS_PATH = "${pwd()}/.ansible/collections"
                         env.GIT_REVISION = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
@@ -224,6 +234,8 @@ sg docker -c "python3 scripts/cleanup.py apply --scope agent --release $RELEASE_
                     rm -f .ssh/known_hosts
                     rmdir .ssh 2>/dev/null || true
                     python3 scripts/cleanup_workspace.py || cleanup_rc=$?
+                    # 이번 빌드가 만든 정확한 경로만 정리한다. 다른 빌드 폴더는 검색하지 않는다.
+                    python3 scripts/cleanup_build_tmp.py || cleanup_rc=$?
                     exit "$cleanup_rc"
                 '''
             }
