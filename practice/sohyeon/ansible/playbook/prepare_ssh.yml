@@ -1,5 +1,7 @@
+# 파일 역할: Jenkins Agent에서 서버의 SSH 호스트 키를 수집해 프로젝트 전용 known_hosts를 준비한다.
 # Jenkins Agent에서 인벤토리 서버의 SSH 호스트 키 준비
 ---
+# Jenkins Agent에서 프로젝트 전용 SSH 호스트 키 파일을 준비한다.
 - name: Prepare private SSH known_hosts
   hosts: localhost
   connection: local
@@ -10,12 +12,14 @@
     ssh_hosts: "{{ (groups['app_servers'] + groups['load_balancer']) | unique | list }}"
 
   tasks:
+    # 다른 사용자의 접근을 제한한 SSH 임시 디렉터리를 만든다.
     - name: Create private SSH directory
       ansible.builtin.file:
         path: "{{ ssh_directory }}"
         state: directory
         mode: "0700"
 
+    # 인벤토리 서버들의 SSH 공개 호스트 키를 수집한다.
     - name: Scan inventory SSH host keys
       ansible.builtin.command:
         argv:
@@ -30,6 +34,7 @@
       register: ssh_keyscan
       changed_when: false
 
+    # 수집한 호스트 키를 후속 SSH 연결에서 사용할 known_hosts 파일에 기록한다.
     - name: Write private known_hosts
       ansible.builtin.copy:
         dest: "{{ ssh_directory }}/known_hosts"

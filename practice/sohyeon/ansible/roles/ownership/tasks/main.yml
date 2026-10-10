@@ -1,0 +1,50 @@
+---
+- name: Refuse application name or port overrides outside the assigned scope
+  ansible.builtin.assert:
+    that:
+      - app_name == 'sohyeon-cicd-app'
+      - image_name == 'sohyeon-cicd-app'
+      - host_port | int == 20007
+      - container_port | int == 80
+- name: Inspect the exact application before changing it
+  community.docker.docker_container_info:
+    docker_host: unix:///var/run/docker.sock
+    name: sohyeon-cicd-app
+  register: owned_container
+  become: true
+  no_log: true
+- name: Require the application to exist
+  ansible.builtin.assert:
+    that: owned_container.exists
+- name: Evaluate ownership without exposing private container configuration
+  ansible.builtin.set_fact:
+    ownership_name_ok: "{{ owned_container.container.Name == '/sohyeon-cicd-app' }}"
+    ownership_labels_ok: >-
+      {{
+        ((owned_container.container.Config.Labels | default({}, true)).get('io.sohyeon.owner') == 'sohyeon'
+        and (owned_container.container.Config.Labels | default({}, true)).get('io.sohyeon.project') == 'sohyeon-cicd')
+      }}
+    ownership_legacy_labels_ok: >-
+      {{ 'io.sohyeon.owner' not in (owned_container.container.Config.Labels | default({}, true))
+         and 'io.sohyeon.project' not in (owned_container.container.Config.Labels | default({}, true)) }}
+    ownership_legacy_id_ok: "{{ owned_container.container.Id == legacy_container_ids.get(inventory_hostname, '') }}"
+    ownership_port_ok: >-
+      {{ (owned_container.container.HostConfig.PortBindings | default({}, true) | length == 1) and
+        (
+        (owned_container.container.HostConfig.PortBindings | default({}, true)).get('80/tcp', [])
+        | map(attribute='HostPort') | list == ['20007']
+        ) }}
+  no_log: true
+
+- name: Require labels or an explicitly approved legacy container ID and the assigned port
+  ansible.builtin.assert:
+    that:
+      - ownership_name_ok | bool
+      - ownership_port_ok | bool
+      - ownership_labels_ok | bool or (bootstrap | bool and ownership_legacy_labels_ok | bool and ownership_legacy_id_ok | bool)
+    fail_msg: >-
+      Refusing replacement on {{ inventory_hostname }}:
+      name_ok={{ ownership_name_ok }}, port_ok={{ ownership_port_ok }},
+      owner_labels_ok={{ ownership_labels_ok }}, bootstrap={{ bootstrap | bool }},
+      legacy_has_no_owner_labels={{ ownership_legacy_labels_ok }},
+      approved_legacy_id_matches={{ ownership_legacy_id_ok }}.

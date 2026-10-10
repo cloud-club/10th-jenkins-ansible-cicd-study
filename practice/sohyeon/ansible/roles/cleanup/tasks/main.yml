@@ -1,0 +1,51 @@
+---
+- name: Validate cleanup mode
+  ansible.builtin.assert:
+    that:
+      - cleanup_mode in ['plan', 'apply']
+      - cleanup_artifacts | length > 0
+
+- name: Prepare unprivileged project runtime
+  ansible.builtin.include_role:
+    name: "{{ playbook_dir }}/../roles/runtime"
+
+- name: Plan or apply project cleanup
+  environment:
+    SOHYEON_DOCKER_SUDO: "{{ '1' if cleanup_scope == 'app' else '0' }}"
+  block:
+    - name: Plan or validate the archived cleanup plan
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ remote_tools }}/cleanup.py"
+          - "{{ 'plan' if cleanup_mode == 'plan' else 'validate-plan' }}"
+          - --scope
+          - "{{ cleanup_scope }}"
+          - --release
+          - "{{ image_tag }}"
+          - --plan
+          - "{{ remote_state }}/cleanup-plan.json"
+          - --result
+          - "{{ remote_state }}/cleanup-result.json"
+      changed_when: false
+
+    - name: Load the validated plan for module execution
+      ansible.builtin.slurp:
+        src: "{{ remote_state }}/cleanup-plan.json"
+      register: remote_cleanup_plan
+      when: cleanup_mode == 'apply'
+
+    - name: Apply only approved candidates through modules
+      ansible.builtin.include_tasks: delete_item.yml
+      loop: "{{ (remote_cleanup_plan.content | b64decode | from_json).candidates if cleanup_mode == 'apply' else [] }}"
+      loop_control:
+        loop_var: cleanup_item
+        index_var: cleanup_index
+        label: "{{ cleanup_item.ref | default(cleanup_item.path | default('unknown')) }}"
+      when: cleanup_mode == 'apply'
+  always:
+    - name: Fetch cleanup evidence even after a deletion failure
+      ansible.builtin.fetch:
+        src: "{{ remote_state }}/cleanup-{{ 'plan' if cleanup_mode == 'plan' else 'result' }}.json"
+        dest: "{{ cleanup_artifacts }}/cleanup-{{ 'plan' if cleanup_mode == 'plan' else 'result' }}-{{ inventory_hostname }}.json"
+        flat: true

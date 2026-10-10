@@ -1,0 +1,38 @@
+# 파일 역할: 앱·LB의 포트, 검사 재시도, 연결 종료 대기 시간 등 공통 배포 변수를 관리한다.
+---
+# 컨테이너·서비스 이름과 Docker 이미지 저장소 이름이다.
+app_name: sohyeon-cicd-app
+image_name: sohyeon-cicd-app
+# 앱의 호스트/컨테이너 포트와 LB 수신 포트를 관리한다.
+host_port: 20007
+container_port: 80
+lb_port: 18007
+# 인벤토리에서 Nginx 제어 작업을 실행할 LB를 선택한다.
+lb_host: "{{ groups['load_balancer'][0] }}"
+# 프로젝트 설정, Nginx PID 파일과 원격 도우미의 위치를 지정한다.
+nginx_config: /etc/nginx/conf.d/sohyeon.conf
+nginx_pid: /run/nginx.pid
+remote_project_dir: "{{ ansible_env.HOME }}/.local/share/sohyeon-cicd"
+remote_tools: "{{ remote_project_dir }}/tools"
+remote_state: "{{ remote_project_dir }}/state"
+remote_tar_dir: "{{ remote_project_dir }}/tmp"
+# 프로젝트 소유권 라벨이 없는 Week1 컨테이너는 관리자가 확인한 전체 ID를 서버별로 명시해야 한다.
+legacy_container_ids:
+  sohyeon-app1: "c209a79128cf027dc6fe2143b663e9de22b67ea81e0344834b8f40c286d371da"
+  sohyeon-app2: "7d6c398c75042946123012133cab010450512b6f432dff420947871360a15ed4"
+  sohyeon-app3: "ea6470102e3b9054e3faafe14265434b9e25ec8c5a776e845078acd3d4e5719c"
+# 평상시 제외 서버는 없으며 서버별 배포 중에만 한 대를 제외한다.
+excluded_hosts: []
+# 기존 Week1 응답 허용 여부다. Jenkins의 최초 v1 전환에서만 활성화한다.
+bootstrap: false
+# 상태 검사 횟수, 재시도 간격, 요청별 제한 시간을 지정한다.
+health_retries: 30
+health_delay: 2
+request_timeout: 2
+# 기존 워커와 앱 연결의 종료를 기다릴 최대 시간(초)이다.
+drain_timeout: 60
+# 2회 × 3초 동안 서버 직접 검사와 LB 경유 검사를 반복한다.
+rejoin_checks: 2
+rejoin_delay: 3
+# 이미지 크기 외에 추가로 확보해야 할 최소 디스크 여유 공간(MB)이다.
+min_free_mb: 512
