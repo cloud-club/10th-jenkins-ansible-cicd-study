@@ -1,0 +1,12 @@
+build/
+*.tar.gz
+*.retry
+__pycache__/
+.DS_Store
+
+# 비밀은 절대 커밋하지 않는다 (운영 규칙 2.3)
+*.pem
+*.key
+id_*
+*.pass
+.env

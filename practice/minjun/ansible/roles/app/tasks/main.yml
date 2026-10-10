@@ -1,0 +1,63 @@
+---
+- name: Check if image already exists on this server
+  community.docker.docker_image_info:
+    name: "{{ app_image }}:{{ image_tag }}"
+  register: img_info
+
+- name: Load image only when missing
+  when: img_info.images | length == 0
+  block:
+    - name: Ensure my staging dir
+      ansible.builtin.file:
+        path: "{{ app_stage_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Copy image archive
+      ansible.builtin.copy:
+        src: "{{ image_archive }}"
+        dest: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+        mode: "0640"
+
+    - name: Load image into docker
+      community.docker.docker_image_load:
+        path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+
+    - name: Remove archive after load
+      ansible.builtin.file:
+        path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+        state: absent
+
+# 이미지 태그가 바뀌면 컨테이너를 다시 만들고, 같으면 그대로 둔다 (멱등).
+- name: Run {{ app_container }} on host port {{ app_port }}
+  community.docker.docker_container:
+    name: "{{ app_container }}"
+    image: "{{ app_image }}:{{ image_tag }}"
+    state: started
+    restart_policy: unless-stopped
+    published_ports:
+      - "{{ app_port }}:8080"
+    env:
+      APP_HOST: "{{ inventory_hostname }}"
+      APP_COLOR: "{{ app_color }}"
+      APP_PORT: "{{ app_port | string }}"
+    labels:
+      owner: "{{ owner }}"
+      color: "{{ app_color }}"
+
+- name: Wait until /health is OK on this server
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/health"
+    status_code: 200
+    timeout: 2
+  register: health
+  until: health.status == 200
+  retries: 15
+  delay: 2
+
+- name: Check /version matches what we deployed
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/version"
+    return_content: true
+  register: ver
+  failed_when: ver.json.version != app_version

@@ -1,0 +1,17 @@
+---
+# 모든 이름에 붙는 내 접두사 (운영 규칙 2.4)
+owner: minjun
+
+# 할당 포트 (노션 1.2)
+lb_port: 18006
+app_ports:
+  blue: 20006    # 기본 App 포트
+  green: 21006   # 추가 App 포트 (2주차 Blue-Green에서 사용)
+
+# 지금 트래픽을 받는 색. 1주차는 blue 고정.
+# 2주차부터는 nginx conf에서 자동 감지하도록 바꾼다.
+active_color: blue
+
+app_image: minjun-app
+# Jenkins가 -e로 넘겨주는 값: app_version, git_sha, image_archive
+image_tag: "{{ app_version }}-{{ git_sha }}"
