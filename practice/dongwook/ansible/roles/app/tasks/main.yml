@@ -53,56 +53,39 @@
         path: "{{ registry_config.path }}"
         state: absent
 
-# The original deployment used dongwook-app on port 20003. Retire it only
-# when blue is inactive, after the first successful switch to green.
-- name: Retire the legacy container only when reusing the inactive blue slot
-  when: deployment_slot == 'blue'
-  block:
-    - name: Inspect the legacy container
-      ansible.builtin.command:
-        argv: [docker, container, inspect, "{{ container_name }}"]
-      register: legacy_container
-      changed_when: false
-      failed_when: >-
-        legacy_container.rc != 0 and
-        'No such container' not in legacy_container.stderr and
-        'No such object' not in legacy_container.stderr
-
-    - name: Confirm ownership and port before retiring the legacy container
-      ansible.builtin.assert:
-        that:
-          - (legacy_container.stdout | from_json)[0].Config.Labels['owner'] | default('') == member
-          - (legacy_container.stdout | from_json)[0].HostConfig.PortBindings['8080/tcp'][0].HostPort == '20003'
-      when: legacy_container.rc == 0
-
-    - name: Remove the inactive legacy blue container
-      ansible.builtin.command:
-        argv: [docker, rm, --force, "{{ container_name }}"]
-      when: legacy_container.rc == 0
-      changed_when: true
-
-- name: Inspect only the candidate slot container
+# Include the legacy container only when blue is inactive. Inspect and validate
+# every removal candidate before deleting any of them.
+- name: Inspect containers in the inactive slot
   ansible.builtin.command:
-    argv: [docker, container, inspect, "{{ candidate_name }}"]
-  register: existing_container
+    argv: [docker, container, inspect, "{{ item }}"]
+  loop: "{{ [candidate_name] + ([container_name] if deployment_slot == 'blue' else []) }}"
+  register: inactive_containers
   changed_when: false
   failed_when: >-
-    existing_container.rc != 0 and
-    'No such container' not in existing_container.stderr and
-    'No such object' not in existing_container.stderr
+    inactive_containers.rc != 0 and
+    'No such container' not in inactive_containers.stderr and
+    'No such object' not in inactive_containers.stderr
 
-- name: Refuse to replace a container without our ownership and slot labels
+- name: Verify ownership, slot and port before removing any container
+  vars:
+    inspected_container: "{{ (item.stdout | from_json)[0] }}"
   ansible.builtin.assert:
     that:
-      - (existing_container.stdout | from_json)[0].Config.Labels['owner'] | default('') == member
-      - (existing_container.stdout | from_json)[0].Config.Labels['deployment_slot'] | default('') == deployment_slot
-      - (existing_container.stdout | from_json)[0].HostConfig.PortBindings['8080/tcp'][0].HostPort | int == candidate_port | int
-  when: existing_container.rc == 0
+      - inspected_container.Config.Labels['owner'] | default('') == member
+      - item.item == container_name or inspected_container.Config.Labels['deployment_slot'] | default('') == deployment_slot
+      - inspected_container.HostConfig.PortBindings[(container_port | string) ~ '/tcp'][0].HostPort | int == candidate_port | int
+  loop: "{{ inactive_containers.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.rc == 0
 
-- name: Remove only our inactive slot container
+- name: Remove the verified inactive containers
   ansible.builtin.command:
-    argv: [docker, rm, --force, "{{ candidate_name }}"]
-  when: existing_container.rc == 0
+    argv: [docker, rm, --force, "{{ item.item }}"]
+  loop: "{{ inactive_containers.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.rc == 0
   changed_when: true
 
 - name: Start the new application
