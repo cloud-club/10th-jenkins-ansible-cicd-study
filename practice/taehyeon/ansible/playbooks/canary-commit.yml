@@ -1,0 +1,60 @@
+---
+# 배포 성공 시 신규 슬롯을, 복구 시 기존 슬롯을 현재 상태로 기록한다.
+- name: Save the active slot after final traffic verification
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Require an explicit current slot before deriving a new state
+      ansible.builtin.assert:
+        that:
+          - active_slot in ['a', 'b']
+      when: deployment_state is not defined
+      tags: [validate]
+
+    - name: Select promoted state when no explicit recovery state is supplied
+      ansible.builtin.set_fact:
+        deployment_state:
+          active_slot: "{{ active_slot if restore_previous | default(false) | bool else ('b' if active_slot == 'a' else 'a') }}"
+          metadata: "{{ metadata if restore_previous | default(false) | bool else {'version':app_version,'gitSha':git_sha,'release':release_id} }}"
+      when: deployment_state is not defined
+      tags: [validate]
+
+    - name: Validate personal state
+      ansible.builtin.assert:
+        that:
+          - deployment_state.active_slot in ['a', 'b']
+          - deployment_state.metadata.version is string
+          - deployment_state.metadata.gitSha is string
+          - deployment_state.metadata.release is string
+          - deployment_state.metadata.version | length > 0
+          - deployment_state.metadata.gitSha | length > 0
+          - deployment_state.metadata.release | length > 0
+      tags: [validate]
+
+    - name: Export the selected state for the Jenkins result report
+      ansible.builtin.copy:
+        content: "{{ deployment_state | to_nice_json }}"
+        dest: "{{ canary_report_dir }}/selected-state.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      when: canary_report_dir is defined
+      tags: [plan]
+
+    - name: Create personal persistent deployment directory
+      ansible.builtin.file:
+        path: /var/lib/taehyeon-deploy
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Atomically save active slot and build metadata
+      ansible.builtin.copy:
+        content: "{{ deployment_state | to_nice_json }}"
+        dest: /var/lib/taehyeon-deploy/state.json
+        owner: root
+        group: root
+        mode: '0644'

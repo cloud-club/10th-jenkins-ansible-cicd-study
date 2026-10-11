@@ -1,4 +1,19 @@
 ---
+- name: Validate inactive slot and personal deployment scope
+  ansible.builtin.assert:
+    that:
+      - active_slot in ['a', 'b']
+      - deploy_slot in ['a', 'b']
+      - deploy_slot != active_slot
+      - app_name == 'taehyeon-app'
+      - app_host_port | int == ({'a':20001, 'b':21001}[deploy_slot])
+      - app_container_port | int == 8080
+      - app_container_name == 'taehyeon-app-' ~ deploy_slot
+      - inventory_hostname in ['app1', 'app2', 'app3']
+    fail_msg: Only the inactive personal slot may be replaced.
+  when: deploy_slot is defined
+  tags: [validate]
+
 - name: Check required build metadata
   ansible.builtin.assert:
     that:
@@ -6,6 +21,7 @@
       - git_sha is defined
       - release_id is defined
     fail_msg: Jenkins must provide app_version, git_sha and release_id.
+  tags: [validate]
   # 이미지에 저장된 값과 비교할 기준을 먼저 확인
 
 - name: Copy Docker image archive from Jenkins Agent
@@ -25,6 +41,24 @@
       - "{{ image_tar_remote }}"
   changed_when: true
   # 전달받은 tar 파일을 Docker 이미지로 등록
+
+# 첫 B 배포는 기존 week6 컨테이너를 유지한다. 이후 A가 비활성이 됐을 때만 정리한다.
+- name: Inspect legacy week6 container on inactive A
+  become: true
+  ansible.builtin.command:
+    argv: [docker, container, inspect, taehyeon-app]
+  register: legacy_container
+  changed_when: false
+  failed_when: legacy_container.rc not in [0, 1]
+  when: deploy_slot | default('') == 'a'
+
+- name: Remove legacy container only from inactive A
+  become: true
+  ansible.builtin.command:
+    argv: [docker, container, rm, --force, taehyeon-app]
+  when:
+    - deploy_slot | default('') == 'a'
+    - legacy_container.rc | default(1) == 0
 
 - name: Check for an existing application container
   become: true # Docker 접근을 위해 기존 sudo 권한 사용

@@ -1,3 +1,38 @@
+// Jenkins가 순서를 제어하고, 원격 작업과 슬롯·가중치 계산은 Ansible에 맡긴다.
+def runCanaryPlaybook(String playbook, Map variables = [:], String stateFile = 'previous-state.json') {
+    writeFile file: "${env.REPORT_DIR}/step-vars.json", text: groovy.json.JsonOutput.toJson(variables)
+    sshagent(credentials: ['taehyeon-appserver-ssh']) {
+        withEnv(["CANARY_PLAYBOOK=${playbook}", "CANARY_STATE_FILE=${stateFile}"]) {
+            dir(env.ANSIBLE_DIR) {
+                sh '''
+                    set -eu
+                    set -- -e "@$WORKSPACE/$REPORT_DIR/deployment-vars.json" \
+                           -e "@$WORKSPACE/$REPORT_DIR/step-vars.json"
+                    if [ -n "$CANARY_STATE_FILE" ]; then
+                        set -- "$@" -e "@$WORKSPACE/$REPORT_DIR/$CANARY_STATE_FILE"
+                    fi
+                    ansible-playbook -i inventory/hosts.ini "playbooks/$CANARY_PLAYBOOK.yml" "$@"
+                '''
+            }
+        }
+    }
+}
+
+// 관찰 도구는 HTTP 요청과 집계만 한다. 실패하면 Jenkins가 다음 Stage를 중단한다.
+def observeCanaryStage(String targets, int percent, String report) {
+    withEnv(["BACKENDS_FILE=${targets}", "TRAFFIC_PERCENT=${percent}", "OBSERVATION_NAME=${report}",
+             "OBSERVE_SECONDS=${params.OBSERVE_SECONDS}", "MIN_SAMPLES=${params.MIN_SAMPLES}",
+             "MAX_RESPONSE_MS=${params.MAX_RESPONSE_MS}"]) {
+        sh '''
+            python3 practice/taehyeon/scripts/observe.py stage \
+              --backends-file "$REPORT_DIR/$BACKENDS_FILE" \
+              --report "$REPORT_DIR/$OBSERVATION_NAME.jsonl" --percent "$TRAFFIC_PERCENT" \
+              --seconds "$OBSERVE_SECONDS" --min-samples "$MIN_SAMPLES" \
+              --max-response-ms "$MAX_RESPONSE_MS"
+        '''
+    }
+}
+
 pipeline {
     agent {
         label 'ansible-agent' // Jenkins Agent에서 빌드와 배포 실행
@@ -6,6 +41,15 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    parameters {
+        string(name: 'OBSERVE_SECONDS', defaultValue: '60', description: '각 단계 관찰 시간(초)')
+        string(name: 'MIN_SAMPLES', defaultValue: '100', description: '각 단계 최소 /version 응답 수')
+        string(name: 'MAX_RESPONSE_MS', defaultValue: '2000', description: '허용 최대 응답 시간(ms)')
     }
 
     environment {
@@ -13,9 +57,9 @@ pipeline {
         APP_DIR = 'practice/taehyeon/app'
         ANSIBLE_DIR = 'practice/taehyeon/ansible'
         APP_VERSION = "${BUILD_NUMBER}" // API에 표시할 버전
-        IMAGE_TAG = "${BUILD_NUMBER}" // Jenkins 빌드 번호를 이미지 버전으로 사용
         NGINX_HOST = '1.201.116.156' // 공용 Nginx Load Balancer
         NGINX_PORT = '18001' // 고태현에게 할당된 Nginx 포트
+        REPORT_DIR = 'practice/taehyeon/.canary/reports'
     }
 
     stages {
@@ -25,7 +69,34 @@ pipeline {
                 script {
                     env.GIT_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
                     env.RELEASE_ID = "build-${env.BUILD_NUMBER}-${env.GIT_SHA.take(12)}"
+                    env.IMAGE_TAG = env.RELEASE_ID
                 } // 빌드한 커밋과 이번 배포를 식별할 릴리스 생성
+                script {
+                    // 이전 복구 파일을 덮어쓰지 않는다. 미완료 복구는 post에서 먼저 처리한다.
+                    if (fileExists("${env.REPORT_DIR}/recovery-needed.json")) {
+                        error('이전 실행의 복구가 필요합니다. post 단계에서 Ansible 복구를 실행합니다.')
+                    }
+                    for (name in ['OBSERVE_SECONDS', 'MIN_SAMPLES', 'MAX_RESPONSE_MS']) {
+                        if (!(params[name] ==~ /[1-9][0-9]*/)) {
+                            error("${name}은 양의 정수여야 합니다.")
+                        }
+                    }
+                    sh 'rm -rf "$REPORT_DIR" && mkdir -p "$REPORT_DIR"'
+                    writeFile file: "${env.REPORT_DIR}/deployment-vars.json",
+                        text: groovy.json.JsonOutput.toJson([
+                            app_name: env.APP_NAME, app_version: env.APP_VERSION, git_sha: env.GIT_SHA,
+                            release_id: env.RELEASE_ID, image_tag: env.IMAGE_TAG,
+                            image_tar: "${pwd()}/${env.APP_NAME}-${env.IMAGE_TAG}.tar",
+                            canary_report_dir: "${pwd()}/${env.REPORT_DIR}"
+                        ])
+                }
+            }
+        }
+
+        stage('Deployment Logic Tests') {
+            steps {
+                // HTTP 관찰기와 Ansible 가중치·슬롯 보호 조건을 VM 접속 없이 검사한다.
+                sh "python3 -m unittest discover -s practice/taehyeon/tests -p 'test_*.py'"
             }
         }
 
@@ -81,52 +152,142 @@ pipeline {
                     sh '''
                         ansible-playbook \\
                           -i inventory/hosts.ini \\
-                          playbooks/deploy.yml \\
-                          --syntax-check
+                          playbooks/deploy.yml --syntax-check
+                        for playbook in canary-state canary-app canary-route canary-commit canary-recover; do
+                            ansible-playbook -i inventory/hosts.ini "playbooks/$playbook.yml" --syntax-check
+                        done
                     ''' // 서버에 접속하지 않고 Inventory와 Playbook 문법 확인
                 }
             }
         }
 
-        stage('Deploy') {
+        stage('Check Existing Service') {
             steps {
-                sshagent(credentials: ['taehyeon-appserver-ssh']) {
-                    dir("${ANSIBLE_DIR}") {
-                        sh '''
-                            ansible-playbook \\
-                              -i inventory/hosts.ini \\
-                              playbooks/deploy.yml \\
-                              -e app_name=${APP_NAME} \\
-                              -e app_version=${APP_VERSION} \\
-                              -e git_sha=${GIT_SHA} \\
-                              -e release_id=${RELEASE_ID} \\
-                              -e image_tag=${IMAGE_TAG} \\
-                              -e image_tar=${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar
-                        ''' // SSH Credential로 App Server 세 대에 배포
+                script {
+                    runCanaryPlaybook('canary-state',
+                        [snapshot_path: "${pwd()}/${env.REPORT_DIR}/previous-state.json"], '')
+                    observeCanaryStage('baseline-backends.json', 0, 'baseline')
+                }
+            }
+        }
+
+        stage('Canary Deployment & Continuous Observation') {
+            failFast true
+            parallel {
+                stage('Continuous HTTP Observation') {
+                    steps {
+                        withEnv(["MAX_RESPONSE_MS=${params.MAX_RESPONSE_MS}"]) {
+                            sh '''
+                                python3 practice/taehyeon/scripts/observe.py monitor \
+                                  --backends-file "$REPORT_DIR/monitor-backends.json" \
+                                  --report "$REPORT_DIR/whole-rollout.jsonl" \
+                                  --ready-file "$REPORT_DIR/monitor.ready" \
+                                  --stop-file "$REPORT_DIR/monitor.stop" \
+                                  --max-response-ms "$MAX_RESPONSE_MS"
+                            '''
+                        }
+                    }
+                }
+                stage('Canary Rollout') {
+                    stages {
+                        stage('Wait for HTTP Observation') {
+                            steps {
+                                // 지속 요청이 준비된 뒤에만 컨테이너 변경을 시작한다.
+                                timeout(time: 1, unit: 'MINUTES') {
+                                    waitUntil(initialRecurrencePeriod: 1000, quiet: true) {
+                                        fileExists("${env.REPORT_DIR}/monitor.ready")
+                                    }
+                                }
+                            }
+                        }
+                        stage('Deploy Candidate to app1') {
+                            steps {
+                                script { runCanaryPlaybook('canary-app', [deploy_hosts: 'app1']) }
+                            }
+                        }
+                        stage('Canary 10%') {
+                            steps {
+                                script {
+                                    // 전환 직전 기준을 보존한다. 실패·취소 시 post가 이 파일로 복구한다.
+                                    writeFile file: "${env.REPORT_DIR}/recovery-needed.json",
+                                              text: readFile("${env.REPORT_DIR}/previous-state.json")
+                                    runCanaryPlaybook('canary-route', [traffic_percent: 10,
+                                        backend_snapshot_path: "${pwd()}/${env.REPORT_DIR}/stage-backends.json"])
+                                    observeCanaryStage('stage-backends.json', 10, 'canary-10')
+                                }
+                            }
+                        }
+                        stage('Deploy Candidate to app2 and app3') {
+                            steps {
+                                script { runCanaryPlaybook('canary-app', [deploy_hosts: 'app2:app3']) }
+                            }
+                        }
+                        stage('Canary 50%') {
+                            steps {
+                                script {
+                                    runCanaryPlaybook('canary-route', [traffic_percent: 50,
+                                        backend_snapshot_path: "${pwd()}/${env.REPORT_DIR}/stage-backends.json"])
+                                    observeCanaryStage('stage-backends.json', 50, 'canary-50')
+                                }
+                            }
+                        }
+                        stage('Canary 100%') {
+                            steps {
+                                script {
+                                    runCanaryPlaybook('canary-route', [traffic_percent: 100,
+                                        backend_snapshot_path: "${pwd()}/${env.REPORT_DIR}/stage-backends.json"])
+                                    observeCanaryStage('stage-backends.json', 100, 'canary-100')
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            // 정상 종료·실패·취소 모두 관찰 분기에 종료를 알린다.
+                            writeFile file: "${env.REPORT_DIR}/monitor.stop", text: 'stop'
+                        }
                     }
                 }
             }
         }
 
-        stage('Verify via Nginx') {
+        stage('Record Successful Promotion') {
             steps {
-                sh '''
-                    python3 practice/taehyeon/scripts/verify.py \\
-                      --url "http://${NGINX_HOST}:${NGINX_PORT}" \\
-                      --version "$APP_VERSION" \\
-                      --git-sha "$GIT_SHA" \\
-                      --release "$RELEASE_ID" \\
-                      --instances app1 app2 app3
-                ''' // Nginx를 거쳐 상태·버전·Git SHA·릴리스 확인
+                script {
+                    // 배포 분기와 지속 관찰 분기가 모두 성공한 경우에만 승격을 기록한다.
+                    runCanaryPlaybook('canary-commit')
+                    writeFile file: "${env.REPORT_DIR}/result.json", text: '{"status":"promoted"}'
+                    sh 'rm -f "$REPORT_DIR/recovery-needed.json"'
+                }
             }
         }
     }
 
     post {
-        always {
-            sh '''
-                rm -f ${WORKSPACE}/${APP_NAME}-${IMAGE_TAG}.tar || true
-            ''' // 성공 여부와 관계없이 임시 이미지 파일 정리
+        unsuccessful {
+            script {
+                if (fileExists("${env.REPORT_DIR}/recovery-needed.json")) {
+                    // 새 SSH 인증으로 Ansible 복구를 실행한다. 복구 실패 시 마커를 유지한다.
+                    try {
+                        timeout(time: 10, unit: 'MINUTES') {
+                            runCanaryPlaybook('canary-recover', [:], 'recovery-needed.json')
+                        }
+                        writeFile file: "${env.REPORT_DIR}/result.json",
+                                  text: '{"status":"failed","recovery":"restored and verified"}'
+                    } catch (Exception recoveryError) {
+                        writeFile file: "${env.REPORT_DIR}/result.json",
+                            text: groovy.json.JsonOutput.toJson([
+                                status: 'failed', recovery: 'failed', recovery_error: recoveryError.toString()
+                            ])
+                        throw recoveryError
+                    }
+                }
+            }
+        }
+        cleanup {
+            // 복구와 전체 HTTP 집계까지 포함해 기록을 보관한다.
+            archiveArtifacts(artifacts: 'practice/taehyeon/.canary/reports/**', allowEmptyArchive: true)
+            sh 'rm -f "$WORKSPACE/$APP_NAME-$IMAGE_TAG.tar" || true'
         }
     }
 }

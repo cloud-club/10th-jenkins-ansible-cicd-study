@@ -1,0 +1,19 @@
+---
+# 10%에서는 app1, 50% 진입 전에는 app2·3의 비활성 슬롯을 배포한다.
+- name: Deploy the candidate only to selected inactive slots
+  hosts: "{{ deploy_hosts | default('app1') }}"
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  vars:
+    # Jenkins는 현재 슬롯만 전달하고 Ansible이 반대 슬롯을 선택한다.
+    deploy_slot: "{{ 'b' if active_slot == 'a' else 'a' }}"
+  pre_tasks:
+    - name: Require explicit active and candidate slots
+      ansible.builtin.assert:
+        that:
+          - active_slot is defined
+          - deploy_slot is defined
+      tags: [validate]
+  roles:
+    - app

@@ -1,0 +1,132 @@
+---
+# 현재 활성 슬롯과 서버 3대의 실제 응답을 확인해 복구 기준을 저장한다.
+- name: Read active slot and verify existing deployment without changing it
+  hosts: load_balancer
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require a local snapshot destination
+      ansible.builtin.assert:
+        that:
+          - snapshot_path is defined
+          - snapshot_path is match('^/')
+
+    - name: Check personal deployment state
+      ansible.builtin.stat:
+        path: /var/lib/taehyeon-deploy/state.json
+      register: state_stat
+
+    - name: Read personal deployment state
+      ansible.builtin.slurp:
+        src: /var/lib/taehyeon-deploy/state.json
+      register: state_blob
+      when: state_stat.stat.exists
+
+    - name: Select stored state or week6 bootstrap
+      # 첫 실행은 상태 파일이 없으므로 기존 week6의 A(20001)를 기준으로 삼는다.
+      ansible.builtin.set_fact:
+        stored_state: "{{ (state_blob.content | b64decode | from_json) if state_stat.stat.exists else {} }}"
+
+    - name: Validate active slot
+      ansible.builtin.assert:
+        that:
+          - stored_state.active_slot | default('a') in ['a', 'b']
+          - not state_stat.stat.exists or stored_state.metadata is defined
+
+    - name: Resolve active port
+      ansible.builtin.set_fact:
+        stable_slot: "{{ stored_state.active_slot | default('a') }}"
+        stable_port: "{{ {'a':20001, 'b':21001}[stored_state.active_slot | default('a')] }}"
+
+    - name: Read both APIs on each active backend from Nginx
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item.0].ansible_host }}:{{ stable_port }}{{ item.1 }}"
+        status_code: 200
+        return_content: true
+        timeout: 5
+      loop: "{{ groups['app_servers'] | product(['/health', '/version']) | list }}"
+      register: backend_checks
+
+    - name: Capture actual stable metadata
+      ansible.builtin.set_fact:
+        stable_metadata:
+          version: "{{ backend_checks.results[0].json.version }}"
+          gitSha: "{{ backend_checks.results[0].json.gitSha }}"
+          release: "{{ backend_checks.results[0].json.release }}"
+
+    - name: Verify metadata types before accepting baseline
+      ansible.builtin.assert:
+        that:
+          - stable_metadata.version is string
+          - stable_metadata.gitSha is string
+          - stable_metadata.release is string
+          - stable_metadata.version | length > 0
+          - stable_metadata.gitSha | length > 0
+          - stable_metadata.release | length > 0
+          - not state_stat.stat.exists or stored_state.metadata == stable_metadata
+
+    - name: Require all three active apps and both APIs to agree
+      ansible.builtin.assert:
+        that:
+          - item.json.version == stable_metadata.version
+          - item.json.gitSha == stable_metadata.gitSha
+          - item.json.release == stable_metadata.release
+          - item.json.instance == item.item.0
+          - item.item.1 != '/health' or item.json.status | default('') == 'UP'
+      loop: "{{ backend_checks.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Save verified baseline into the Jenkins workspace
+      ansible.builtin.copy:
+        content: "{{ {'active_slot':stable_slot, 'metadata':stable_metadata} | to_nice_json }}"
+        dest: "{{ snapshot_path }}"
+        mode: '0600'
+      delegate_to: localhost
+
+    - name: Prepare observation and recovery files when called by Jenkins
+      when: canary_report_dir is defined
+      block:
+        - name: Use the verified state to build traffic plans
+          ansible.builtin.set_fact:
+            active_slot: "{{ stable_slot }}"
+            metadata: "{{ stable_metadata }}"
+
+        - name: Calculate baseline backends
+          ansible.builtin.include_tasks: ../tasks/canary-backends.yml
+          vars:
+            traffic_percent: 0
+
+        - name: Save baseline observation targets
+          ansible.builtin.copy:
+            content: "{{ canary_backends | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/baseline-backends.json"
+            mode: '0600'
+          delegate_to: localhost
+
+        - name: Save emergency routing variables
+          ansible.builtin.copy:
+            content: "{{ {'nginx_backends':canary_backends} | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/recovery-vars.json"
+            mode: '0600'
+          delegate_to: localhost
+
+        - name: Save emergency state variables
+          ansible.builtin.copy:
+            content: "{{ {'deployment_state':{'active_slot':stable_slot,'metadata':stable_metadata}} | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/previous-state-vars.json"
+            mode: '0600'
+          delegate_to: localhost
+
+        - name: Calculate both releases for continuous HTTP monitoring
+          ansible.builtin.include_tasks: ../tasks/canary-backends.yml
+          vars:
+            traffic_percent: 50
+
+        - name: Save allowed continuous observation targets
+          ansible.builtin.copy:
+            content: "{{ canary_backends | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/monitor-backends.json"
+            mode: '0600'
+          delegate_to: localhost
