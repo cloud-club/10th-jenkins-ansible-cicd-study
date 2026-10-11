@@ -8,7 +8,7 @@ def runCanaryPlaybook(String playbook, Map variables = [:], String stateFile = '
                     set -eu
                     set -- -e "@$WORKSPACE/$REPORT_DIR/deployment-vars.json" \
                            -e "@$WORKSPACE/$REPORT_DIR/step-vars.json"
-                    if [ -n "$CANARY_STATE_FILE" ]; then
+                    if [ -n "${CANARY_STATE_FILE:-}" ]; then
                         set -- "$@" -e "@$WORKSPACE/$REPORT_DIR/$CANARY_STATE_FILE"
                     fi
                     ansible-playbook -i inventory/hosts.ini "playbooks/$CANARY_PLAYBOOK.yml" "$@"
