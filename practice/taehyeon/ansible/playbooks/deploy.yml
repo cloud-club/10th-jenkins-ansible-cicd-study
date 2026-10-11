@@ -1,0 +1,20 @@
+---
+- name: Deploy Spring Boot application to all App Servers
+  hosts: app_servers
+  gather_facts: false
+  become: false
+  any_errors_fatal: true # 앱 배포가 하나라도 실패하면 Nginx 단계 진행 중단
+
+  # app Role에서 이미지 전달, 컨테이너 실행, Health Check 수행
+  roles:
+    - app
+
+- name: Configure personal Nginx after all App Servers pass verification
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+
+  # Nginx 서버의 기존 sudo 권한으로 개인 설정 적용 및 reload
+  roles:
+    - nginx

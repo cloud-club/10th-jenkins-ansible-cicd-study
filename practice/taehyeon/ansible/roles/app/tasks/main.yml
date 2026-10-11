@@ -1,0 +1,111 @@
+---
+- name: Check required build metadata
+  ansible.builtin.assert:
+    that:
+      - app_version is defined
+      - git_sha is defined
+      - release_id is defined
+    fail_msg: Jenkins must provide app_version, git_sha and release_id.
+  # 이미지에 저장된 값과 비교할 기준을 먼저 확인
+
+- name: Copy Docker image archive from Jenkins Agent
+  ansible.builtin.copy:
+    src: "{{ image_tar }}"
+    dest: "{{ image_tar_remote }}"
+    mode: "0644"
+  # Agent에서 빌드한 이미지를 각 App Server로 전달
+
+- name: Load Docker image on App Server
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
+  ansible.builtin.command:
+    argv:
+      - docker
+      - load
+      - -i
+      - "{{ image_tar_remote }}"
+  changed_when: true
+  # 전달받은 tar 파일을 Docker 이미지로 등록
+
+- name: Check for an existing application container
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
+  ansible.builtin.command:
+    argv:
+      - docker
+      - container
+      - inspect
+      - "{{ app_container_name }}"
+  register: existing_container
+  changed_when: false
+  failed_when: false
+  # 기존 컨테이너가 있는지 확인
+
+- name: Remove the existing application container
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
+  ansible.builtin.command:
+    argv:
+      - docker
+      - container
+      - rm
+      - --force
+      - "{{ app_container_name }}"
+  when: existing_container.rc == 0
+  # 같은 이름의 컨테이너가 있으면 교체
+
+- name: Start the new application container
+  become: true # Docker 접근을 위해 기존 sudo 권한 사용
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --detach
+      - --name
+      - "{{ app_container_name }}"
+      - --restart
+      - unless-stopped
+      - --publish
+      - "{{ app_host_port }}:{{ app_container_port }}"
+      - --env
+      - "APP_INSTANCE={{ inventory_hostname }}"
+      - "{{ app_name }}:{{ image_tag }}"
+  # 새 버전 컨테이너를 실행하고 서버별 인스턴스 이름 전달
+
+- name: Wait until the application health endpoint is ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_host_port }}/health"
+    method: GET
+    status_code: 200
+    return_content: true
+  register: health_check
+  retries: 10
+  delay: 3
+  until:
+    - health_check.status == 200
+    - health_check.json.status == 'UP'
+  # 배포한 애플리케이션이 정상 응답할 때까지 확인
+
+- name: Read deployed application version
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_host_port }}/version"
+    status_code: 200
+    return_content: true
+  register: version_check
+
+- name: Verify build metadata on this App Server
+  ansible.builtin.assert:
+    that:
+      - health_check.json.version == (app_version | string)
+      - health_check.json.gitSha == git_sha
+      - health_check.json.release == release_id
+      - health_check.json.instance == inventory_hostname
+      - version_check.json.version == (app_version | string)
+      - version_check.json.gitSha == git_sha
+      - version_check.json.release == release_id
+      - version_check.json.instance == inventory_hostname
+    fail_msg: "Build metadata mismatch on {{ inventory_hostname }}"
+  # App Server 3대 모두 Jenkins에서 테스트한 빌드인지 검증
+
+- name: Remove the copied Docker image archive
+  ansible.builtin.file:
+    path: "{{ image_tar_remote }}"
+    state: absent
+  # 배포가 확인되면 App Server의 임시 파일 정리
