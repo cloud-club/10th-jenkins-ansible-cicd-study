@@ -122,22 +122,15 @@
   retries: 15
   delay: 2
 
-- name: Read deployed version
-  ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ candidate_port }}/version"
-    use_proxy: false
-    timeout: 5
-    return_content: true
-  register: version_response
-
 - name: Verify this server runs the tested release
   ansible.builtin.assert:
     that:
-      - version_response.json.version == app_version
-      - version_response.json.release == release_id
-      - version_response.json.revision == git_revision
-      - version_response.json.instance == inventory_hostname
-      - version_response.json.slot == deployment_slot
+      - health.json.service == container_name
+      - health.json.version == app_version
+      - health.json.release == release_id
+      - health.json.revision == git_revision
+      - health.json.instance == inventory_hostname
+      - health.json.slot == deployment_slot
 
 - name: Record that this server passed candidate checks in this run
   ansible.builtin.set_fact:

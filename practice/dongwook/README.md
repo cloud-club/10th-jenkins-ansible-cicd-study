@@ -181,8 +181,8 @@ flowchart LR
 1. 배포 시작 시 인벤토리·릴리스 정보·이미지 digest·Registry 인증 변수를 한 번 검사한다. 이후 Nginx의 기존 설정을 읽어 `dongwook_backend`의 세 IP가 모두 같은 `20003` 또는 `21003`을 사용하는지 확인한다. 설정이 없거나 혼합 포트·다른 서버가 있으면 배포를 중단한다. 이 Playbook은 현재 서비스의 전환용이며 초기 서버 설치용이 아니다.
 2. Nginx에서 `/health`를 한 번 호출해 현재 서비스 상태와 이전 release를 확인하고, 응답의 슬롯이 설정 파일과 일치하는지 검사한다. 이전 실패로 설정 파일과 실행 상태가 어긋났다면 먼저 이를 복구해야 한다.
 3. 세 서버에 순서대로 비활성 슬롯 컨테이너를 생성한다. 기존 활성 슬롯은 계속 서비스한다. 비활성 슬롯의 교체 대상들을 모두 조회해 `owner=dongwook`, 슬롯 라벨과 할당 포트를 검사한 뒤 삭제한다. Blue를 재사용할 때는 1주차 legacy 컨테이너도 같은 절차로 처리하며, 하나라도 소유권이나 포트가 다르면 삭제 전에 중단한다.
-4. 각 서버의 로컬 `/health`, `/version`에서 release·commit·instance·slot을 검사한다. 한 서버라도 실패하면 이후 트래픽 전환을 진행하지 않는다.
-5. 세 서버가 모두 통과한 사실을 확인한 뒤, Nginx 서버에서도 새 포트의 `/health`, `/version`을 각각 호출한다. 이 단계에서 LB와 App 사이 방화벽 문제도 확인한다.
+4. 각 서버의 로컬 `/health` 응답에서 상태와 service·version·release·commit·instance·slot을 함께 검사한다. 한 서버라도 실패하면 이후 서버 배포와 트래픽 전환을 진행하지 않는다.
+5. 세 서버가 모두 통과한 사실을 확인한 뒤, Nginx 서버에서도 새 포트의 `/health`를 호출해 상태와 배포 정보를 검사한다. 이 단계는 로컬 검사로 확인할 수 없는 LB와 App 사이 방화벽 문제를 확인한다.
 6. 기존 설정을 `.previous` 파일로 보관하고 새 템플릿을 적용한다. 템플릿이 변경되고 `nginx -t`가 성공하면 `Reload Dongwook Nginx` Handler를 notify하고, `meta: flush_handlers`로 즉시 실행한다. Handler의 실행 결과를 바로 assert하여 실패를 일반 Task 실패로 전달하므로 기존 `block/rescue`에서 복구한다. Handler의 `ignore_errors`는 이 결과 전달 용도이며, 실패를 배포 성공으로 처리하지 않는다. discovery 이후 설정 파일이 변경되었다면 덮어쓰지 않고 중단한다.
 7. Agent가 실제 Nginx 주소로 반복 요청하여 `/health`, `/version` 각각에서 세 instance를 모두 관측하고 새 release·commit·slot을 확인한다. 검증 실패 또는 설정 검사·Reload 실패 시 원래 설정을 복원하고 Reload한 뒤 이전 release를 검증한다. 복구에 성공해도 Jenkins 빌드는 실패로 남긴다.
 8. 성공 후에도 이전 슬롯 컨테이너는 유지한다. 다음 배포가 그 비활성 슬롯을 재사용할 때 교체한다.
@@ -195,7 +195,7 @@ Nginx Reload는 새 worker가 신규 연결을 받게 하고 기존 worker의 �
 
 | 실패 지점 | 동작 |
 | --- | --- |
-| 이미지 Pull / 컨테이너 실행 / 후보 health·version 검사 | 기존 트래픽 유지, 빌드 실패. 일부 비활성 슬롯에 새 이미지가 남을 수 있음 |
+| 이미지 Pull / 컨테이너 실행 / 후보 health·배포 정보 검사 | 기존 트래픽 유지, 빌드 실패. 일부 비활성 슬롯에 새 이미지가 남을 수 있음 |
 | Nginx 설정 검사 / Reload / 전환 후 HTTP 검증 | 이전 설정 복원 → 검사 → Reload → 이전 release 확인 → 빌드 실패 |
 | SSH 단절 / Jenkins 강제 종료 / 복구 자체 실패 | 자동 복구 완료를 보장하지 않음. 설정 파일·실제 응답 확인 후 수동 복구 필요 |
 
@@ -302,6 +302,9 @@ APP_VERSION=local .venv/bin/python -m uvicorn main:app --app-dir app --port 8080
 
 - 배포 보조 로직 테스트: **29개 통과**. 슬롯 판별, 잘못된 release/slot/instance 응답 거부, 전환 후 세 서버 확인, 재시도 한도, 성공률 계산, 단일 오류 보존, 정상 응답이 없는 baseline에서 배포 미실행, 부분 장애를 기록한 뒤 배포 진행, 배포 명령 실패 시 보고서 실패 처리를 확인했다.
 - `ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/deploy.yml --syntax-check` 통과.
+- 공통 검증은 임시 로컬 인벤토리에서 잘못된 digest·빈 release·인증 누락 3가지가 서버 작업 전에 중단되는지 확인했다.
+- 컨테이너 교체 Task는 Docker 명령을 모의 실행 파일로 대체해 legacy 이전·빈 슬롯·소유권/슬롯/포트 불일치·Docker 오류 등 9가지 시나리오를 확인했다. 삭제 대상 중 하나라도 검증에 실패하면 어떤 컨테이너도 삭제하지 않았다.
+- 후보 검증 Task는 로컬 HTTP 서버로 App·Nginx 각각 정상 응답과 service/version/release/revision/instance/slot 불일치·상태 오류·HTTP 오류, 총 18가지 시나리오를 확인했다.
 - 모든 프로젝트 Python 파일 문법, Ansible YAML 및 Jinja 표현식 파싱을 확인했다.
 - blue/green Nginx 템플릿을 각각 렌더링하고 다음 슬롯 판별 결과를 확인했다.
 - Jenkinsfile 내부 shell 구문의 `sh -n`과 `git diff --check`를 확인했다.

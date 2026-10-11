@@ -18,6 +18,7 @@
   until: >-
     candidate_health.status | default(0) == 200 and
     candidate_health.json.status | default('') == 'ok' and
+    candidate_health.json.service | default('') == container_name and
     candidate_health.json.release | default('') == release_id and
     candidate_health.json.version | default('') == app_version and
     candidate_health.json.revision | default('') == git_revision and
@@ -25,28 +26,6 @@
     candidate_health.json.slot | default('') == target_slot
   retries: 5
   delay: 2
-
-- name: Check every candidate version endpoint from the load balancer
-  ansible.builtin.uri:
-    url: "http://{{ hostvars[item].ansible_host }}:{{ slot_ports[target_slot] }}/version"
-    use_proxy: false
-    timeout: 5
-    return_content: true
-  loop: "{{ groups['app_servers'] }}"
-  register: candidate_versions
-
-- name: Validate all candidate identities before touching Nginx
-  ansible.builtin.assert:
-    that:
-      - item.json.service == container_name
-      - item.json.version == app_version
-      - item.json.release == release_id
-      - item.json.revision == git_revision
-      - item.json.instance == item.item
-      - item.json.slot == target_slot
-  loop: "{{ candidate_versions.results }}"
-  loop_control:
-    label: "{{ item.item }}"
 
 - name: Check for configuration changes since discovery
   ansible.builtin.slurp:
