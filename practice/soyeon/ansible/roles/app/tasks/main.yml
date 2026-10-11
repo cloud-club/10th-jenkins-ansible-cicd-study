@@ -1,0 +1,78 @@
+---
+- name: Check required deployment variables
+  ansible.builtin.assert:
+    that:
+      - image_ref is defined
+      - image_ref is match('^[a-z0-9][a-z0-9_-]*/cc-practice@sha256:[0-9a-f]{64}$')
+      - app_version is defined
+      - release_id is defined
+      - git_revision is defined
+    fail_msg: Jenkins must provide the Docker Hub image digest and deployment metadata.
+
+- name: Pull the exact Docker Hub image by digest
+  ansible.builtin.command:
+    argv:
+      - docker
+      - pull
+      - "{{ image_ref }}"
+  register: docker_pull
+  changed_when: "'Downloaded newer image' in docker_pull.stdout"
+
+- name: Remove only Soyeon's existing container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - rm
+      - --force
+      - "{{ app_name }}"
+  register: remove_container
+  changed_when: remove_container.rc == 0
+  failed_when: remove_container.rc not in [0, 1]
+
+- name: Start the new application container
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --detach
+      - --name
+      - "{{ app_name }}"
+      - --restart
+      - unless-stopped
+      - --publish
+      - "{{ app_port }}:{{ container_port }}"
+      - --env
+      - "APP_VERSION={{ app_version }}"
+      - --env
+      - "RELEASE_ID={{ release_id }}"
+      - --env
+      - "GIT_REVISION={{ git_revision }}"
+      - --env
+      - "INSTANCE_ID={{ inventory_hostname }}"
+      - --env
+      - "DEPLOYMENT_SLOT={{ deployment_slot }}"
+      - "{{ image_ref }}"
+  register: start_container
+  changed_when: start_container.rc == 0
+
+- name: Wait for the application health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/health"
+    method: GET
+    return_content: true
+    status_code: 200
+  register: health_response
+  retries: 20
+  delay: 2
+  until:
+    - health_response.status == 200
+    - health_response.json.status == "ok"
+    - health_response.json.version == app_version
+
+- name: Verify the deployed version and instance
+  ansible.builtin.assert:
+    that:
+      - health_response.json.service == app_name
+      - health_response.json.release == release_id
+      - health_response.json.revision == git_revision
+      - health_response.json.instance == inventory_hostname

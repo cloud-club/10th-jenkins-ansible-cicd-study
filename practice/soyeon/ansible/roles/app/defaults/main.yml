@@ -1,0 +1,5 @@
+---
+app_name: soyeon-app
+app_port: 20002
+container_port: 8000
+deployment_slot: primary

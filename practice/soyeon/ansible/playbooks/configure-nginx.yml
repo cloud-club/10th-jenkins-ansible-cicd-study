@@ -1,0 +1,32 @@
+---
+- name: Configure Soyeon's Nginx virtual service
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  become_user: root
+  serial: 1
+  vars:
+    nginx_config_path: /etc/nginx/conf.d/soyeon.conf
+    nginx_listen_port: 18002
+    app_port: 20002
+  tasks:
+    - name: Install Soyeon's Nginx configuration
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/soyeon.conf.j2"
+        dest: "{{ nginx_config_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: nginx_config
+
+    - name: Validate the complete Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      when: nginx_config.changed
+
+    - name: Reload Nginx only after validation succeeds
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+      when: nginx_config.changed
