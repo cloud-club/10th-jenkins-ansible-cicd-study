@@ -1,0 +1,120 @@
+pipeline {
+    agent { label 'ansible-control' }
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 20, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+    }
+    environment {
+        PROJECT_DIR = 'practice/taewook'
+        SSH_CREDENTIAL = 'SSH_KeyPair-cc10-cicd.pem'
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    env.APP_VERSION = readFile("${env.PROJECT_DIR}/app/VERSION").trim()
+                    if (!(env.APP_VERSION ==~ /[A-Za-z0-9][A-Za-z0-9_.-]{0,30}/)) {
+                        error('Invalid app/VERSION')
+                    }
+                    env.RELEASE_ID = "${env.APP_VERSION}-${env.GIT_SHA.take(12)}-${env.BUILD_NUMBER}"
+                    env.IMAGE_REF = "taewook-app:${env.RELEASE_ID}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.RELEASE_ID}"
+                }
+                dir(env.PROJECT_DIR) {
+                    sh 'mkdir -p build; rm -f build/verification.json build/deploy-vars.json'
+                }
+            }
+        }
+        stage('Preflight') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL,
+                    keyFileVariable: 'ANSIBLE_PRIVATE_KEY_FILE', usernameVariable: 'ANSIBLE_REMOTE_USER')]) {
+                    dir("${env.PROJECT_DIR}/ansible") {
+                        sh '''
+                            set -eu
+                            export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+                            docker info --format '{{.ServerVersion}}'
+                            ansible-inventory --graph
+                            ansible-playbook preflight.yml
+                            ansible-playbook deploy.yml --syntax-check
+                            ansible-playbook verify.yml --syntax-check
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        set -eu
+                        python3 -m unittest discover -s app -p 'test_*.py' -v
+                        docker build --build-arg APP_VERSION="$APP_VERSION" \
+                            --build-arg GIT_SHA="$GIT_SHA" --build-arg RELEASE_ID="$RELEASE_ID" \
+                            --label owner=taewook -t "$IMAGE_REF" .
+                    '''
+                }
+            }
+        }
+        stage('Test') {
+            steps { dir(env.PROJECT_DIR) { sh 'sh scripts/test-image.sh' } }
+        }
+        stage('Package') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+docker save "$IMAGE_REF" | gzip > build/image.tar.gz
+python3 - <<'PY'
+import json, os, subprocess
+image_id = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', os.environ['IMAGE_REF']], text=True).strip()
+data = dict(image_ref=os.environ['IMAGE_REF'], image_id=image_id,
+            app_version=os.environ['APP_VERSION'], git_sha=os.environ['GIT_SHA'],
+            release_id=os.environ['RELEASE_ID'], image_archive=os.path.abspath('build/image.tar.gz'))
+with open('build/deploy-vars.json', 'w') as f:
+    json.dump(data, f, indent=2)
+print('Packaged', data['image_ref'], image_id)
+PY
+'''
+                }
+            }
+        }
+        stage('Deploy') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL,
+                    keyFileVariable: 'ANSIBLE_PRIVATE_KEY_FILE', usernameVariable: 'ANSIBLE_REMOTE_USER')]) {
+                    dir("${env.PROJECT_DIR}/ansible") {
+                        sh 'ANSIBLE_CONFIG="$PWD/ansible.cfg" ansible-playbook deploy.yml -e @../build/deploy-vars.json'
+                    }
+                }
+            }
+        }
+        stage('Verify') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL,
+                    keyFileVariable: 'ANSIBLE_PRIVATE_KEY_FILE', usernameVariable: 'ANSIBLE_REMOTE_USER')]) {
+                    dir("${env.PROJECT_DIR}/ansible") {
+                        sh 'ANSIBLE_CONFIG="$PWD/ansible.cfg" ansible-playbook verify.yml -e @../build/deploy-vars.json'
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            dir(env.PROJECT_DIR) {
+                archiveArtifacts artifacts: 'build/deploy-vars.json,build/verification.json', allowEmptyArchive: true
+                sh '''
+                    rm -f build/image.tar.gz
+                    docker rm -f "taewook-test-$BUILD_NUMBER" >/dev/null 2>&1 || true
+                    if [ -n "${IMAGE_REF:-}" ]; then docker image rm "$IMAGE_REF" >/dev/null 2>&1 || true; fi
+                '''
+            }
+        }
+    }
+}
