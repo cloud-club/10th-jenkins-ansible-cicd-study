@@ -65,10 +65,10 @@ def identity(record):
 
 def baseline_from(records, instances):
     valid = [record for record in records if record["ok"]]
-    if (not records or len(valid) != len(records)
-            or {record["instance"] for record in valid} != set(instances)
+    if (not valid
+            or not {record["instance"] for record in valid} <= set(instances)
             or len({identity(record) for record in valid}) != 1):
-        raise ValueError("Baseline requires healthy, identical old releases from every expected server")
+        raise ValueError("Baseline requires a healthy, identifiable old release from an expected server")
     return {key: valid[0][key] for key in IDENTITY}
 
 

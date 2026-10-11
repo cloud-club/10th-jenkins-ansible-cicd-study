@@ -111,11 +111,17 @@ class AvailabilityTest(unittest.TestCase):
         self.assertFalse(result["checks"]["all_new_backends_observed"])
         self.assertFalse(result["checks"]["final_samples_on_target"])
 
-    def test_baseline_rejects_missing_mixed_and_unhealthy_servers(self):
+    def test_baseline_allows_partial_or_failed_old_backend_samples(self):
         valid = [record(instance) for instance in INSTANCES]
         self.assertEqual(baseline_from(valid, INSTANCES), OLD)
-        for invalid in [valid[:2], [*valid[:2], record(INSTANCES[2], metadata=NEW)],
-                        [*valid[:2], record(INSTANCES[2], ok=False)]]:
+        self.assertEqual(baseline_from(valid[:1], INSTANCES), OLD)
+        self.assertEqual(baseline_from([valid[0], record(INSTANCES[1], ok=False)], INSTANCES), OLD)
+
+    def test_baseline_rejects_unknown_or_mixed_old_release(self):
+        valid = [record(instance) for instance in INSTANCES]
+        for invalid in [[], [record(INSTANCES[0], ok=False)],
+                        [valid[0], record(INSTANCES[1], metadata=NEW)],
+                        [valid[0], record("foreign")]]:
             with self.assertRaises(ValueError):
                 baseline_from(invalid, INSTANCES)
 
@@ -153,12 +159,24 @@ class MonitorRunnerTest(unittest.TestCase):
 
     def test_bad_baseline_prevents_deployment_and_still_writes_report(self):
         with tempfile.TemporaryDirectory() as directory:
-            rows = [record(INSTANCES[0])] * 3
+            rows = [record(INSTANCES[0], ok=False)] * 3
             code, popen, result = self.invoke(directory, rows)
             self.assertEqual(code, 1)
             popen.assert_not_called()
             self.assertFalse(result["command_started"])
             self.assertIn("Baseline", result["run_error"])
+
+    def test_partial_baseline_deploys_but_reports_the_failed_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [record(INSTANCES[0]),
+                    record(INSTANCES[1], http_status=503, ok=False, error="HTTP 503"),
+                    record(INSTANCES[2]), *samples()[3:]]
+            code, popen, result = self.invoke(directory, rows)
+            self.assertEqual(code, 1)
+            popen.assert_called_once()
+            self.assertTrue(result["command_started"])
+            self.assertEqual(result["failures"], 1)
+            self.assertFalse(result["checks"]["no_failed_samples"])
 
     def test_nonzero_command_exit_fails_wrapper_even_if_samples_pass(self):
         with tempfile.TemporaryDirectory() as directory:

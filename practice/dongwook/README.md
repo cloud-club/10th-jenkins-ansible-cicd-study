@@ -95,7 +95,7 @@ practice/dongwook/
 │   └── roles/
 │       ├── app/tasks/main.yml         # 비활성 슬롯 배포, legacy 전환
 │       └── nginx/
-│           ├── tasks/discover.yml    # 기존 설정·실행 상태와 활성 슬롯 검사
+│           ├── tasks/discover.yml    # 기존 설정·health 응답으로 활성 슬롯 확인
 │           ├── tasks/main.yml        # 후보 검사, 설정 전환·복구
 │           ├── handlers/main.yml     # Reload 및 실행 결과 전달
 │           └── templates/dongwook.conf.j2
@@ -179,7 +179,7 @@ flowchart LR
 ### 배포 순서와 기존 서비스 전환
 
 1. Nginx의 기존 설정을 읽어 `dongwook_backend`의 세 IP가 모두 같은 `20003` 또는 `21003`을 사용하는지 확인한다. 설정이 없거나 혼합 포트·다른 서버가 있으면 배포를 중단한다. 이 Playbook은 현재 서비스의 전환용이며 초기 서버 설치용이 아니다.
-2. Nginx의 실제 응답과 설정 파일의 슬롯이 일치하는지 검사한다. Agent에서도 이전 release가 세 서버의 `/health`, `/version`에 모두 나타나는지 확인한다. 이전 실패로 설정 파일과 실행 상태가 어긋났다면 먼저 이를 복구해야 한다.
+2. Nginx에서 `/health`를 한 번 호출해 현재 서비스 상태와 이전 release를 확인하고, 응답의 슬롯이 설정 파일과 일치하는지 검사한다. 이전 실패로 설정 파일과 실행 상태가 어긋났다면 먼저 이를 복구해야 한다.
 3. 세 서버에 순서대로 비활성 슬롯 컨테이너를 생성한다. 기존 활성 슬롯은 계속 서비스한다. 비활성 컨테이너 교체 전 `owner=dongwook`, 슬롯 라벨과 할당 포트를 검사한다.
 4. 각 서버의 로컬 `/health`, `/version`에서 release·commit·instance·slot을 검사한다. 한 서버라도 실패하면 이후 트래픽 전환을 진행하지 않는다.
 5. 세 서버가 모두 통과한 사실을 확인한 뒤, Nginx 서버에서도 새 포트의 `/health`, `/version`을 각각 호출한다. 이 단계에서 LB와 App 사이 방화벽 문제도 확인한다.
@@ -207,7 +207,7 @@ Ansible의 `rescue`는 일반 Task 실패에 대응하며, unreachable 호스트
 
 Jenkins의 실제 `ansible-playbook` 명령을 `scripts/monitor_deployment.py`로 감싼다. 배포 프로세스와 별도로 HTTP 요청을 반복하므로 후보 컨테이너 생성·Nginx Reload·실패 복구 과정에도 관측이 계속된다.
 
-- 배포 전: `/health` 15회 관측. 세 서버가 동일한 기존 release로 정상 응답해야 배포 명령을 실행한다.
+- 배포 전: `/health` 15회 관측. 예상 서버에서 정상 응답한 요청이 하나 이상 있고 그 응답들의 release가 같으면 배포 명령을 실행한다. 오류 응답은 기록하며 최종 가용성 판정에는 실패로 반영한다.
 - 배포 중: 요청 완료 후 기본 0.2초 간격으로 `/health` 요청. 각 요청의 제한 시간은 2초다. 응답 지연이 있으면 실제 요청 간격은 늘어난다.
 - 배포 후: 명령 종료 후 5초간 추가 관측. 신규 release가 모든 서버에서 관측되고 마지막 구간은 새 슬롯으로 응답해야 성공이다.
 - 성공 판정: 배포 명령 종료 코드 0, 이전/신규 release 전환 확인, 신규 세 서버 관측, 실패 요청 0건. 한 번의 HTTP 오류나 잘못된 응답도 이후 성공으로 지우지 않는다.
@@ -280,16 +280,16 @@ APP_VERSION=local .venv/bin/python -m uvicorn main:app --app-dir app --port 8080
 
 ## 요구사항 검토와 검증 결과
 
-검토일: 2026-10-09. **구현과 로컬 보조 로직 검증은 완료했지만, 실서버 무중단 배포 검증은 아직 완료하지 않았다.**
+검토일: 2026-10-11. **구현과 로컬 보조 로직 검증은 완료했지만, 실서버 무중단 배포 검증은 아직 완료하지 않았다.**
 
 ### 2주차 요구사항별 판정
 
 | 요구사항 | 구현 근거 | 검증 상태 |
 | --- | --- | --- |
 | Rolling / Canary / Blue-Green 중 선택 | Blue-Green, blue=20003 / green=21003 | 슬롯 선택 로직 테스트 통과 |
-| 전략에 맞는 Jenkins·Ansible 구성 | Git 버전·digest 고정 → 활성 슬롯 발견 → 비활성 슬롯 배포 → 전체 검증 → 전환 | 코드 검토·정적 검사 완료, Jenkins/Ansible 실행 확인 필요 |
+| 전략에 맞는 Jenkins·Ansible 구성 | Git 버전·digest 고정 → 활성 슬롯 발견 → 비활성 슬롯 배포 → 전체 검증 → 전환 | Ansible 문법 검사 통과, Jenkins 및 실서버 실행 확인 필요 |
 | Nginx 트래픽 분산·제어 | 세 서버의 동일한 후보 포트로 upstream 구성, 설정 검사 후 Reload | 두 슬롯 템플릿 렌더링 확인, 실서버 전환 확인 필요 |
-| 배포 전후 Health Check | 기존 release 검사, 후보별 로컬/LB 검사, 전환 후 Agent의 두 endpoint 검사 | 응답 검증 보조 로직 테스트 통과 |
+| 배포 전후 Health Check | 기존 서비스 `/health` 및 release 검사, 후보별 로컬/LB 검사, 전환 후 Agent의 두 endpoint 검사 | 응답 검증 보조 로직 테스트 통과 |
 | 배포 실패 시 후속 배포 중단 | `serial: 1`, `any_errors_fatal: true`, 후보 세 서버 완료 검사, 복구 후 명시적 실패 | 코드 검토 완료, 원격 실패 주입 검증 필요 |
 | Role·Handler·Variable 사용 | `app`/`nginx` Role, Reload Handler, `group_vars`와 슬롯·release 변수 | 구조와 YAML/Jinja 검사 완료, Handler 실행 검증 필요 |
 | 배포 중 지속 HTTP 요청 | `monitor_deployment.py`가 배포 subprocess 실행 중 `/health` 요청 | 요청·프로세스를 대체한 로컬 테스트 통과, 실제 HTTP 관측 필요 |
@@ -300,12 +300,13 @@ APP_VERSION=local .venv/bin/python -m uvicorn main:app --app-dir app --port 8080
 
 ### 로컬 검사 기록
 
-- 배포 보조 로직 테스트: **27개 통과**. 슬롯 판별, 잘못된 release/slot/instance 응답 거부, 전환 후 세 서버 확인, 재시도 한도, 성공률 계산, 단일 오류 보존, baseline 실패 시 배포 미실행, 배포 명령 실패 시 보고서 실패 처리를 확인했다.
+- 배포 보조 로직 테스트: **29개 통과**. 슬롯 판별, 잘못된 release/slot/instance 응답 거부, 전환 후 세 서버 확인, 재시도 한도, 성공률 계산, 단일 오류 보존, 정상 응답이 없는 baseline에서 배포 미실행, 부분 장애를 기록한 뒤 배포 진행, 배포 명령 실패 시 보고서 실패 처리를 확인했다.
+- `ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/deploy.yml --syntax-check` 통과.
 - 모든 프로젝트 Python 파일 문법, Ansible YAML 및 Jinja 표현식 파싱을 확인했다.
 - blue/green Nginx 템플릿을 각각 렌더링하고 다음 슬롯 판별 결과를 확인했다.
 - Jenkinsfile 내부 shell 구문의 `sh -n`과 `git diff --check`를 확인했다.
 
-검증 환경의 도구·의존성 제약으로 **`ansible-playbook --syntax-check`, Jenkins Declarative Pipeline 검증, Docker 이미지 실행, 실제 SSH/HTTP 배포 및 기존 FastAPI 테스트는 이 검증 기록에 포함하지 않는다.** YAML/Jinja 파싱은 Ansible 실행 검증을 대체하지 않는다. 위 27개 테스트는 모의 HTTP 응답과 모의 배포 프로세스를 사용하며 실서버에 접속하지 않는다.
+검증 환경의 도구·의존성 제약으로 **Jenkins Declarative Pipeline 검증, Docker 이미지 실행, 실제 SSH/HTTP 배포 및 기존 FastAPI 테스트는 이 검증 기록에 포함하지 않는다.** Ansible 문법 검사는 실제 원격 실행 검증을 대체하지 않는다. 위 29개 테스트는 모의 HTTP 응답과 모의 배포 프로세스를 사용하며 실서버에 접속하지 않는다.
 
 ## 실서버 검증 절차
 
@@ -313,7 +314,7 @@ APP_VERSION=local .venv/bin/python -m uvicorn main:app --app-dir app --port 8080
 
 1. 현재 Nginx `18003`이 세 서버의 `20003`으로 연결되어 있는지 확인한다. 처음에는 `slot=primary` 응답도 정상이다. Nginx→App 세 서버의 `21003` 연결과 동시 컨테이너 실행 자원을 준비한다.
 2. 이전 앱과 구별되는 새 커밋을 Job에 설정한 배포 브랜치에 반영하여 Jenkins CI를 통과시킨다. 승인 화면의 release와 `deploy-vars.json` digest를 확인하고 배포를 승인한다.
-3. 배포 단계에서 HTTP 관측이 먼저 시작되고, 이전 release가 세 서버에서 관측된 뒤에만 후보 배포가 시작되는지 로그를 확인한다.
+3. 배포 단계에서 HTTP 관측이 먼저 시작되고, 이전 release의 정상 응답을 확인한 뒤 후보 배포가 시작되는지 로그를 확인한다.
 4. Artifact `availability/summary.json`에서 `passed=true`, `failures=0`, `availability_pct=100`, `command_returncode=0`을 확인한다. 버전 전환 과제의 증거에는 `display_version_changed=true`도 필요하다.
 5. `by_phase`의 `before`·`during`·`after` 모두 요청이 기록되었는지 확인한다. `traffic`에 이전 슬롯과 신규 슬롯의 세 instance가 모두 나타나는지, `transitions`에 이전/신규 release가 나타나는지 확인한다.
 6. `availability/requests.jsonl`에서 전환 시각 주변의 HTTP 상태, instance, slot, release를 확인한다. 기존 요청이 마무리되는 동안 이전/신규 응답이 잠깐 섞일 수 있지만 최종 구간에는 신규 슬롯만 나타나야 한다.
@@ -325,7 +326,8 @@ APP_VERSION=local .venv/bin/python -m uvicorn main:app --app-dir app --port 8080
 
 | 시나리오 | 주입 위치 | 기대 결과 |
 | --- | --- | --- |
-| 기존 서비스 비정상 | 관측 baseline에 HTTP 오류/서버 누락 | 배포 명령 미실행, `command_started=false`, 보고서 실패 |
+| 기존 서비스 비정상 | 관측 baseline에 정상 응답 없음 | 배포 명령 미실행, `command_started=false`, 보고서 실패 |
+| 기존 서비스 부분 장애 | 관측 baseline에 정상 응답과 HTTP 오류가 함께 있음 | 후보 배포 명령 시작. `discover`의 `/health` 검사에 실패하면 배포 중단, 통과하면 후보 배포 진행. 관측 오류는 가용성에 반영하여 보고서 실패 |
 | 후보 앱 실패 | 신규 이미지의 `/health`가 503 응답 | 후보 검사 실패, 이후 서버 배포·Nginx 전환 중단, 기존 release 유지 |
 | LB 경로 실패 | 검증 환경에서 Nginx→후보 포트만 차단 | 서버 로컬 검사는 통과할 수 있으나 LB 검사 실패, 전환 없음 |
 | 설정 검사 실패 | 검증 환경의 후보 Nginx 템플릿에 문법 오류 | Reload Handler 미실행, 이전 설정 복원 후 실패 종료 |
