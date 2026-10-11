@@ -1,11 +1,26 @@
 ---
-- name: Require the complete deployment topology
+- name: Validate deployment topology and release metadata once
   ansible.builtin.assert:
     that:
       - not ansible_check_mode
       - groups['load_balancers'] | length == 1
       - groups['app_servers'] | length == 3
-    fail_msg: Deployment requires one load balancer, three app servers, and normal execution without --check.
+      - member == 'dongwook'
+      - container_name == 'dongwook-app'
+      - slot_ports == {'blue':20003, 'green':21003}
+      - app_version | default('') | length > 0
+      - release_id | default('') | length > 0
+      - git_revision | default('') | length > 0
+      - image_repository | default('') is match('^[a-z0-9][a-z0-9_-]*/dongwook-app$')
+      - image_ref | default('') is match('^' ~ (image_repository | regex_escape) ~ '@sha256:[0-9a-f]{64}$')
+    fail_msg: Check the complete inventory and digest-based release metadata before deployment.
+
+- name: Check registry credentials before contacting app servers
+  ansible.builtin.assert:
+    that:
+      - lookup('ansible.builtin.env', 'DOCKERHUB_USERNAME') | length > 0
+      - lookup('ansible.builtin.env', 'DOCKERHUB_TOKEN') | length > 0
+  no_log: true
 
 - name: Read the existing configuration for discovery and rollback
   ansible.builtin.slurp:

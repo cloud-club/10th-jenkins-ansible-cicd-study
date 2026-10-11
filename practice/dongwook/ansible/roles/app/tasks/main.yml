@@ -1,19 +1,8 @@
 ---
-- name: Validate deployment scope and required build variables
+- name: Require slot discovery before preparing a candidate
   ansible.builtin.assert:
     that:
-      - member == 'dongwook'
-      - container_name == 'dongwook-app'
-      - slot_ports == {'blue':20003, 'green':21003}
       - hostvars[groups['load_balancers'][0]].target_slot is defined
-      - groups['app_servers'] | length == 3
-      - image_ref is defined
-      - image_repository is defined
-      - app_version is defined
-      - release_id is defined
-      - git_revision is defined
-      - image_repository is match('^[a-z0-9][a-z0-9_-]*/dongwook-app$')
-      - image_ref is match('^' ~ image_repository ~ '@sha256:[0-9a-f]{64}$')
 
 - name: Select only the inactive slot discovered on the load balancer
   ansible.builtin.set_fact:
@@ -30,13 +19,6 @@
     that:
       - deployment_slot in ['blue', 'green']
       - deployment_slot != active_slot
-
-- name: Check registry credentials supplied by Jenkins
-  ansible.builtin.assert:
-    that:
-      - lookup('ansible.builtin.env', 'DOCKERHUB_USERNAME') | length > 0
-      - lookup('ansible.builtin.env', 'DOCKERHUB_TOKEN') | length > 0
-  no_log: true
 
 - name: Create an isolated Docker authentication directory
   ansible.builtin.tempfile:
