@@ -1,3 +1,5 @@
+def recoveryRequired = false
+
 pipeline {
     agent { label 'ansible-control' }
     options {
@@ -13,7 +15,6 @@ pipeline {
     environment {
         PROJECT_DIR = 'practice/taewook'
         SSH_CREDENTIAL = 'SSH_KeyPair-cc10-cicd.pem'
-        RECOVERY_REQUIRED = 'false'
     }
     stages {
         stage('Checkout') {
@@ -110,7 +111,7 @@ PY
                     stages {
                         stage('Prepare candidate') {
                             steps {
-                                script { env.RECOVERY_REQUIRED = 'true' }
+                                script { recoveryRequired = true }
                                 script { playbook('prepare.yml', '-e @../build/state.json') }
                             }
                         }
@@ -151,7 +152,7 @@ PY
     post {
         unsuccessful {
             script {
-                if (env.RECOVERY_REQUIRED == 'true') {
+                if (recoveryRequired) {
                     playbook('traffic.yml', '-e @../build/state.json -e traffic_percent=0')
                     dir(env.PROJECT_DIR) { sh 'python3 scripts/observe.py --name recovery --target 0' }
                 }
