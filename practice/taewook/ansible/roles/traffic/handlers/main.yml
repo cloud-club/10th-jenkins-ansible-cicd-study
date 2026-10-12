@@ -1,0 +1,17 @@
+---
+- name: Apply personal traffic
+  ansible.builtin.shell: |
+    set -eu
+    exec 9>"{{ nginx_lock }}"
+    flock -w 60 9
+    nginx -t
+    cp -p "{{ nginx_conf }}" "{{ app_stage }}/before-reload.conf"
+    cp "{{ nginx_stage }}" "{{ nginx_conf }}"
+    if ! nginx -t || ! systemctl reload nginx; then
+      cp -p "{{ app_stage }}/before-reload.conf" "{{ nginx_conf }}"
+      nginx -t && systemctl reload nginx
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: true

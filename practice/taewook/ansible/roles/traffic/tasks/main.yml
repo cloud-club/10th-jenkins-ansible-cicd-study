@@ -1,0 +1,35 @@
+---
+- name: 변경 범위 확인
+  ansible.builtin.assert:
+    that:
+      - nginx_conf == '/etc/nginx/conf.d/taewook.conf'
+      - stable_port | int in [20004, 21004]
+      - candidate_port | int in [20004, 21004]
+      - stable_port | int != candidate_port | int
+      - traffic_percent | int in [0, 10, 50, 100]
+- name: 작업 디렉터리 준비
+  ansible.builtin.file:
+    path: "{{ app_stage }}"
+    state: directory
+    mode: '0750'
+- name: 변경할 설정 작성
+  ansible.builtin.template:
+    src: canary.conf.j2
+    dest: "{{ nginx_stage }}"
+    mode: '0644'
+  when: traffic_percent | int != 0
+  notify: Apply personal traffic
+- name: 실패 시 배포 전 설정 준비
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../build/previous.conf"
+    dest: "{{ nginx_stage }}"
+    mode: '0644'
+  when: traffic_percent | int == 0
+  notify: Apply personal traffic
+# 파일이 같아도 이전 reload가 실패했을 수 있어 다시 적용한다.
+- name: 적용 예약
+  ansible.builtin.command: /bin/true
+  changed_when: true
+  notify: Apply personal traffic
+- name: 다음 검사 전에 트래픽 반영
+  ansible.builtin.meta: flush_handlers
