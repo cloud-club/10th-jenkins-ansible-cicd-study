@@ -1,0 +1,56 @@
+---
+- name: Safely install Doyeon's Nginx configuration
+  block:
+    - name: Render only the personal configuration file
+      ansible.builtin.template:
+        src: doyeon.conf.j2
+        dest: "{{ nginx_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+        backup: true
+      register: nginx_template
+
+    - name: Validate the complete Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+      when: nginx_template.changed
+
+    - name: Queue a reload only after validation
+      ansible.builtin.debug:
+        msg: "Validated {{ nginx_config }}"
+      changed_when: nginx_template.changed
+      notify: Reload Nginx
+
+    - name: Apply validated configuration before HTTP checks
+      ansible.builtin.meta: flush_handlers
+
+  rescue:
+    - name: Restore the previous personal configuration
+      ansible.builtin.copy:
+        src: "{{ nginx_template.backup_file }}"
+        dest: "{{ nginx_config }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - nginx_template is defined
+        - nginx_template.backup_file is defined
+
+    - name: Remove a newly created invalid personal configuration
+      ansible.builtin.file:
+        path: "{{ nginx_config }}"
+        state: absent
+      when:
+        - nginx_template is defined
+        - nginx_template.changed | default(false)
+        - nginx_template.backup_file is not defined
+
+    - name: Verify Nginx after restoring the prior configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Stop the first deployment
+      ansible.builtin.fail:
+        msg: "Nginx setup failed; Doyeon's prior configuration was restored."

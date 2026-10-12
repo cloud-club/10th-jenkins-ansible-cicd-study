@@ -1,0 +1,144 @@
+def notifyDiscord(String status) {
+  try {
+    withCredentials([string(credentialsId: 'doyeon-discord-webhook', variable: 'DISCORD_WEBHOOK')]) {
+      withEnv([
+        "NOTIFY_STATUS=${status}",
+        "NOTIFY_DURATION=${currentBuild.durationString.replace(' and counting', '')}"
+      ]) {
+        sh '''
+          set +x
+          python3 - <<'PY' | curl -sS -m 10 -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK" || true
+import json, os
+e = os.environ.get
+lines = [
+    "[doyeon] " + e("NOTIFY_STATUS", ""),
+    "Job: " + e("JOB_NAME", "") + " #" + e("BUILD_NUMBER", ""),
+    "모드: " + e("DEPLOY_MODE", "-") + " / 버전: " + e("APP_VERSION", "-") + " (release " + e("RELEASE_ID", "-") + ")",
+    "소요 시간: " + e("NOTIFY_DURATION", ""),
+    e("BUILD_URL", ""),
+]
+print(json.dumps({"content": "\\n".join(lines), "allowed_mentions": {"parse": []}}))
+PY
+        '''
+      }
+    }
+  } catch (err) {
+    echo "Discord notification skipped: ${err.class.simpleName}"
+  }
+}
+
+pipeline {
+  agent { label 'ansible-agent' }
+  options {
+    disableConcurrentBuilds()
+    timestamps()
+  }
+  parameters {
+    string(name: 'APP_VERSION', defaultValue: 'v1', description: 'v1 또는 v2')
+    choice(name: 'DEPLOY_MODE', choices: ['bootstrap', 'rolling'], description: '첫 배포 또는 롤링 배포')
+    choice(name: 'ROLLING_BATCH_SIZE', choices: ['1', '2'], description: '롤링 배포 시 동시에 교체할 앱 서버 수')
+  }
+  environment {
+    APP_VERSION = "${params.APP_VERSION}"
+    DEPLOY_MODE = "${params.DEPLOY_MODE}"
+    ROLLING_BATCH_SIZE = "${params.ROLLING_BATCH_SIZE ?: '1'}"
+  }
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+    stage('Test and build') {
+      steps {
+        script {
+          if (!(params.APP_VERSION ==~ /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/)) {
+            error('Invalid APP_VERSION')
+          }
+          env.RELEASE_ID = "${params.APP_VERSION}-${env.BUILD_NUMBER}"
+          env.IMAGE_REF = "dodopoo/doyeon-app:${env.RELEASE_ID}"
+        }
+        dir('practice/doyeon/app') {
+          sh 'python3 -m unittest test_main.py -v'
+          sh '''
+            docker build --build-arg APP_VERSION="$APP_VERSION" \
+              --build-arg RELEASE_ID="$RELEASE_ID" \
+              -t "$IMAGE_REF" .
+          '''
+        }
+      }
+    }
+    stage('Push image') {
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'doyeon-dockerhub',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_TOKEN'
+        )]) {
+          sh '''
+            set +x
+            export DOCKER_CONFIG="$WORKSPACE/.doyeon-docker-config"
+            mkdir -p "$DOCKER_CONFIG"
+            printf '%s' "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
+            docker push "$IMAGE_REF"
+            docker logout
+          '''
+        }
+      }
+    }
+    stage('Verify Ansible targets and syntax') {
+      steps {
+        dir('practice/doyeon/ansible') {
+          sh '''
+            ansible-inventory --graph
+            ansible-playbook "playbooks/$DEPLOY_MODE.yml" --list-hosts
+            ansible-playbook "playbooks/$DEPLOY_MODE.yml" --syntax-check
+          '''
+        }
+      }
+    }
+    stage('Deploy') {
+      steps {
+        dir('practice/doyeon/ansible') {
+          sshagent(credentials: ['doyeon-app-ssh']) {
+            sh '''
+              ansible-playbook "playbooks/$DEPLOY_MODE.yml" \
+                -e "image_ref=$IMAGE_REF" \
+                -e "app_version=$APP_VERSION" \
+                -e "release_id=$RELEASE_ID" \
+                -e "rolling_batch_size=$ROLLING_BATCH_SIZE"
+            '''
+          }
+        }
+      }
+    }
+    stage('Verify through Nginx') {
+      steps {
+        sh '''
+          python3 - <<'PY'
+import json, os, urllib.request
+base = "http://1.201.116.156:18005"
+for path in ("/health", "/version"):
+    with urllib.request.urlopen(base + path, timeout=5) as response:
+        assert response.status == 200
+        data = json.load(response)
+    assert data["version"] == os.environ["APP_VERSION"], data
+    assert data["release"] == os.environ["RELEASE_ID"], data
+    print(path, data)
+PY
+        '''
+      }
+    }
+  }
+  post {
+    always {
+      sh '''
+        if [ -n "${IMAGE_REF:-}" ]; then
+          docker image rm "$IMAGE_REF" || true
+        fi
+        rm -rf "$WORKSPACE/.doyeon-docker-config"
+      '''
+    }
+    success { script { notifyDiscord('✅ 성공') } }
+    failure { script { notifyDiscord('❌ 실패') } }
+    aborted { script { notifyDiscord('⚠️ 중단') } }
+  }
+}

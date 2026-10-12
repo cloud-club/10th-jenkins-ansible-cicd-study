@@ -1,0 +1,9 @@
+FROM python:3.12-alpine
+WORKDIR /app
+COPY main.py /app/main.py
+ARG APP_VERSION=v1
+ARG RELEASE_ID=local
+ENV APP_VERSION=${APP_VERSION} RELEASE_ID=${RELEASE_ID}
+EXPOSE 8080
+USER 10001
+CMD ["python", "/app/main.py"]
