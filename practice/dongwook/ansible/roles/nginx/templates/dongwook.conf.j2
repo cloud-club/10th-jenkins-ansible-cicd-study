@@ -1,12 +1,13 @@
 upstream {{ nginx_upstream }} {
 {% for host in groups['app_servers'] %}
-    server {{ hostvars[host].ansible_host }}:{{ app_port }};
+    server {{ hostvars[host].ansible_host }}:{{ slot_ports[target_slot] }};
 {% endfor %}
 }
 
 server {
     listen {{ nginx_port }};
     server_name _;
+    add_header X-Deployment-Slot {{ target_slot }} always;
 
     location / {
         proxy_pass http://{{ nginx_upstream }};
