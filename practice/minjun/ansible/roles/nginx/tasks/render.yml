@@ -1,0 +1,33 @@
+---
+# conf를 staging에 렌더링하고, 실제 conf와 다를 때만 handler를 부른다.
+# app 그룹 play(rolling.yml)에서도 불리므로 모든 작업을 LB로 delegate한다.
+#
+# 렌더링은 반드시 여기(태스크)에서 끝낸다. handler는 notify한 태스크의 vars를
+# 못 볼 수 있어서(import_role로 넘긴 drained_hosts가 handler에선 []로 보임, 로컬 검증)
+# handler는 변수 없이 "staging 파일을 적용"만 한다.
+
+- name: Ensure staging dir
+  ansible.builtin.file:
+    path: "{{ nginx_stage | dirname }}"
+    state: directory
+    mode: "0755"
+  delegate_to: "{{ nginx_lb_host }}"
+
+- name: Render conf to staging
+  ansible.builtin.template:
+    src: minjun.conf.j2
+    dest: "{{ nginx_stage }}"
+    mode: "0644"
+  delegate_to: "{{ nginx_lb_host }}"
+
+# staging 파일끼리가 아니라 "실제 conf"와 비교한다.
+# 지난 실행이 nginx -t에서 실패해 staging만 바뀐 채 끝났어도, 다음 실행에서 다시 적용되게 하려는 것.
+# cmp: 0=같음, 1=다름, 2=파일 없음(첫 배포) → 0이 아니면 적용 대상
+- name: Compare staging with live conf
+  ansible.builtin.command:
+    argv: [cmp, -s, "{{ nginx_stage }}", "{{ nginx_conf }}"]
+  register: nginx_cmp
+  changed_when: nginx_cmp.rc != 0
+  failed_when: false
+  delegate_to: "{{ nginx_lb_host }}"
+  notify: apply nginx conf

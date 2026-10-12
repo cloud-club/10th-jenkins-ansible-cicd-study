@@ -5,3 +5,5 @@ app_color: blue
 app_port: "{{ app_ports[app_color] }}"
 app_container: "{{ owner }}-app-{{ app_color }}"
 app_stage_dir: "/opt/{{ owner }}/images"
+# 파이프라인이 로드한 이미지 ID 기록 (태그별 파일). 무결성 게이트의 기준값
+app_id_dir: "/opt/{{ owner }}/image-ids"
