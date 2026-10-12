@@ -1,0 +1,45 @@
+---
+- name: First deployment to all three app servers
+  hosts: app_servers
+  become: true
+  gather_facts: false
+  serial: 1
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Require an explicit image and release
+      ansible.builtin.assert:
+        that:
+          - image_ref is defined
+          - app_version is defined
+          - release_id is defined
+          - image_ref | length > 0
+  roles:
+    - app
+
+- name: Install only Doyeon's Nginx virtual server
+  hosts: load_balancers
+  become: true
+  gather_facts: false
+  roles:
+    - nginx
+  tasks:
+    - name: Verify the load balancer health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nginx_port }}/health"
+        status_code: 200
+        return_content: true
+      register: lb_health
+      retries: 6
+      delay: 2
+      until: lb_health.status == 200 and lb_health.json.status == 'ok'
+
+    - name: Verify the load balancer serves this release
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nginx_port }}/version"
+        status_code: 200
+        return_content: true
+      register: lb_version
+      failed_when: >-
+        lb_version.status != 200 or
+        lb_version.json.version != app_version or
+        lb_version.json.release != release_id

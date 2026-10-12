@@ -1,0 +1,6 @@
+ansible_user: doyeon
+app_port: 20005
+nginx_port: 18005
+container_name: doyeon-app
+nginx_config: /etc/nginx/conf.d/doyeon.conf
+lb_host: doyeon_lb

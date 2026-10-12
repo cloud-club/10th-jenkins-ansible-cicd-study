@@ -1,0 +1,98 @@
+pipeline {
+  agent { label 'ansible-agent' }
+  options {
+    disableConcurrentBuilds()
+    timestamps()
+  }
+  parameters {
+    string(name: 'APP_VERSION', defaultValue: 'v1', description: 'v1 또는 v2')
+  }
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+    stage('Test and build') {
+      steps {
+        script {
+          if (!(params.APP_VERSION ==~ /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/)) {
+            error('Invalid APP_VERSION')
+          }
+          env.RELEASE_ID = "${params.APP_VERSION}-${env.BUILD_NUMBER}"
+        }
+        dir('practice/doyeon/app') {
+          sh 'python3 -m unittest test_main.py -v'
+          sh '''
+            docker build --build-arg APP_VERSION="$APP_VERSION" \
+              --build-arg RELEASE_ID="$RELEASE_ID" \
+              -t "doyeon-app:$RELEASE_ID" .
+          '''
+        }
+      }
+    }
+    stage('Push image') {
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'doyeon-dockerhub',
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_TOKEN'
+        )]) {
+          script { env.IMAGE_REF = "${env.DOCKER_USER}/doyeon-app:${env.RELEASE_ID}" }
+          sh '''
+            set +x
+            export DOCKER_CONFIG="$WORKSPACE/.doyeon-docker-config"
+            mkdir -p "$DOCKER_CONFIG"
+            printf '%s' "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
+            docker tag "doyeon-app:$RELEASE_ID" "$IMAGE_REF"
+            docker push "$IMAGE_REF"
+            docker logout
+          '''
+        }
+      }
+    }
+    stage('Verify Ansible targets and syntax') {
+      steps {
+        dir('practice/doyeon/ansible') {
+          sh '''
+            ansible-inventory --graph
+            ansible-playbook playbooks/bootstrap.yml --list-hosts
+            ansible-playbook playbooks/bootstrap.yml --syntax-check
+          '''
+        }
+      }
+    }
+    stage('Deploy') {
+      steps {
+        dir('practice/doyeon/ansible') {
+          sshagent(credentials: ['doyeon-app-ssh']) {
+            sh '''
+              ansible-playbook playbooks/bootstrap.yml \
+                -e "image_ref=$IMAGE_REF" \
+                -e "app_version=$APP_VERSION" \
+                -e "release_id=$RELEASE_ID"
+            '''
+          }
+        }
+      }
+    }
+    stage('Verify through Nginx') {
+      steps {
+        sh '''
+          python3 - <<'PY'
+import json, os, urllib.request
+base = "http://1.201.116.156:18005"
+for path in ("/health", "/version"):
+    with urllib.request.urlopen(base + path, timeout=5) as response:
+        assert response.status == 200
+        data = json.load(response)
+    assert data["version"] == os.environ["APP_VERSION"], data
+    assert data["release"] == os.environ["RELEASE_ID"], data
+    print(path, data)
+PY
+        '''
+      }
+    }
+  }
+  post {
+    always { sh 'rm -rf "$WORKSPACE/.doyeon-docker-config"' }
+  }
+}
