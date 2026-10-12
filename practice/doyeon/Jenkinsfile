@@ -6,6 +6,11 @@ pipeline {
   }
   parameters {
     string(name: 'APP_VERSION', defaultValue: 'v1', description: 'v1 또는 v2')
+    choice(name: 'DEPLOY_MODE', choices: ['bootstrap', 'rolling'], description: '첫 배포 또는 롤링 배포')
+  }
+  environment {
+    APP_VERSION = "${params.APP_VERSION}"
+    DEPLOY_MODE = "${params.DEPLOY_MODE}"
   }
   stages {
     stage('Checkout') {
@@ -54,8 +59,8 @@ pipeline {
         dir('practice/doyeon/ansible') {
           sh '''
             ansible-inventory --graph
-            ansible-playbook playbooks/bootstrap.yml --list-hosts
-            ansible-playbook playbooks/bootstrap.yml --syntax-check
+            ansible-playbook "playbooks/$DEPLOY_MODE.yml" --list-hosts
+            ansible-playbook "playbooks/$DEPLOY_MODE.yml" --syntax-check
           '''
         }
       }
@@ -65,7 +70,7 @@ pipeline {
         dir('practice/doyeon/ansible') {
           sshagent(credentials: ['doyeon-app-ssh']) {
             sh '''
-              ansible-playbook playbooks/bootstrap.yml \
+              ansible-playbook "playbooks/$DEPLOY_MODE.yml" \
                 -e "image_ref=$IMAGE_REF" \
                 -e "app_version=$APP_VERSION" \
                 -e "release_id=$RELEASE_ID"

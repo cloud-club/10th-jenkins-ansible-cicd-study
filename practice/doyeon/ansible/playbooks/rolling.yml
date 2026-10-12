@@ -1,0 +1,117 @@
+---
+- name: Refuse to start when any current backend is unhealthy
+  hosts: app_servers
+  become: false
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Check the direct health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/health"
+        status_code: 200
+        return_content: true
+      register: before_health
+      failed_when: before_health.status != 200 or before_health.json.status != 'ok'
+
+- name: Refuse to start unless all three backends are active in Nginx
+  hosts: load_balancers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Validate the current Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Require exactly one enabled line for each App server
+      ansible.builtin.command:
+        argv:
+          - grep
+          - -Fxc
+          - "    server {{ hostvars[item].ansible_host }}:{{ app_port }};"
+          - "{{ nginx_config }}"
+      loop: "{{ groups['app_servers'] }}"
+      register: active_backend
+      changed_when: false
+      failed_when: active_backend.rc != 0 or active_backend.stdout != '1'
+
+- name: Drain, deploy, check, and rejoin one backend at a time
+  hosts: app_servers
+  become: true
+  gather_facts: false
+  strategy: linear
+  serial: 1
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Require an explicit image and release
+      ansible.builtin.assert:
+        that:
+          - image_ref is defined
+          - app_version is defined
+          - release_id is defined
+          - image_ref | length > 0
+  tasks:
+    - name: Deploy one backend
+      block:
+        - name: Drain this backend in Doyeon's upstream
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ hostvars[inventory_hostname].ansible_host | regex_escape }}:{{ app_port }};$"
+            line: "    server {{ hostvars[inventory_hostname].ansible_host }}:{{ app_port }} down;"
+            backrefs: true
+          delegate_to: "{{ lb_host }}"
+          register: drained
+
+        - name: Stop if the expected enabled upstream line is missing
+          ansible.builtin.assert:
+            that: drained.changed
+            fail_msg: "Expected enabled backend line missing from {{ nginx_config }}; no deployment occurred."
+
+        - name: Validate Nginx after draining
+          ansible.builtin.command: nginx -t
+          delegate_to: "{{ lb_host }}"
+          changed_when: false
+
+        - name: Reload Nginx with this backend drained
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+          delegate_to: "{{ lb_host }}"
+
+        - name: Allow old Nginx workers to finish active requests
+          ansible.builtin.pause:
+            seconds: 3
+
+        - name: Replace and verify the application container
+          ansible.builtin.include_role:
+            name: app
+
+        - name: Return this healthy backend to the upstream
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ hostvars[inventory_hostname].ansible_host | regex_escape }}:{{ app_port }} down;$"
+            line: "    server {{ hostvars[inventory_hostname].ansible_host }}:{{ app_port }};"
+            backrefs: true
+          delegate_to: "{{ lb_host }}"
+          register: rejoined
+
+        - name: Stop if the drained upstream line is missing
+          ansible.builtin.assert:
+            that: rejoined.changed
+
+        - name: Validate Nginx after rejoining
+          ansible.builtin.command: nginx -t
+          delegate_to: "{{ lb_host }}"
+          changed_when: false
+
+        - name: Reload Nginx with the verified backend restored
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+          delegate_to: "{{ lb_host }}"
+
+      rescue:
+        - name: Stop the rollout and leave an unverified backend out of traffic
+          ansible.builtin.fail:
+            msg: >-
+              Rolling deployment stopped at {{ inventory_hostname }}.
+              Check its direct /health and {{ nginx_config }} before re-enabling traffic.
