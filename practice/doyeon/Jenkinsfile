@@ -93,6 +93,12 @@ PY
     }
   }
   post {
-    always { sh 'rm -rf "$WORKSPACE/.doyeon-docker-config"' }
+    always {
+      sh '''
+        [ -n "$RELEASE_ID" ] && docker rmi "doyeon-app:$RELEASE_ID" || true
+        [ -n "$IMAGE_REF" ] && docker rmi "$IMAGE_REF" || true
+        rm -rf "$WORKSPACE/.doyeon-docker-config"
+      '''
+    }
   }
 }

@@ -53,3 +53,21 @@
     direct_version.json.version != app_version or
     direct_version.json.release != release_id or
     direct_version.json.instance != inventory_hostname
+
+- name: List images in this release repository
+  ansible.builtin.command:
+    argv:
+      - docker
+      - image
+      - ls
+      - "{{ image_ref.rsplit(':', 1)[0] }}"
+      - --format
+      - "{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}"
+  register: repo_images
+  changed_when: false
+
+- name: Remove older images of only Doyeon's repository
+  ansible.builtin.command:
+    argv: [docker, rmi, "{{ item }}"]
+  loop: "{{ repo_images.stdout_lines | reject('equalto', image_ref) | reject('search', ':<none>$') | list }}"
+  failed_when: false
