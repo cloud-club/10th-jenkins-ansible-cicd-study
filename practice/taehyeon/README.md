@@ -1,124 +1,202 @@
 # 태현 CI/CD 실습
 
 이론 정리는 `study/`, 실습 코드는 `practice/taehyeon/`에서 관리한다.
+week7은 기존 서비스를 유지하며 새 버전 트래픽을 10% → 50% → 100%로 확대하는 카나리 배포다.
+Jenkins가 단계와 실패 처리를 제어하고, Ansible이 슬롯 선택·가중치 계산·VM 변경·복구를 수행한다. Python은 HTTP 관찰과 집계만 담당한다.
+
+아키텍처와 배포 흐름, Playbook별 역할, 모니터링 고민은 [카나리 배포 정리](docs/canary-deployment.md)에서 확인할 수 있다.
+
+## 구성
+
+```text
+Jenkins Controller (VM 1)
+  └─ Agent + Ansible (VM 2): Checkout → Gradle Test/Build → Docker Build/Test/Save
+       ├─ SSH → App Server 1~3: 비활성 슬롯에 동일 이미지 배포
+       └─ SSH → Nginx (VM 3): Handler가 공통 잠금 안에서 적용·검사·reload
+
+사용자 → Nginx 1.201.116.156:18001
+          ├─ app1 / app2 / app3:20001 → 슬롯 A 컨테이너:8080
+          └─ app1 / app2 / app3:21001 → 슬롯 B 컨테이너:8080
+```
+
+| 슬롯 | 호스트 포트 | 컨테이너 |
+| --- | --- | --- |
+| A | 20001 | taehyeon-app-a |
+| B | 21001 | taehyeon-app-b |
+
+첫 실행에서는 week6의 `taehyeon-app:20001`이 기존 A 역할을 한다.
+기존 앱을 삭제하지 않고 app1 B를 먼저 배포한다. A→B 승격 이후 다음 배포는 B→A로 진행한다.
+다음 A 배포 때만 비활성 포트 20001의 week6 컨테이너를 정리한다.
 
 ```text
 practice/taehyeon/
-├── app/                       # Spring Boot, Gradle, Dockerfile
+├── app/                         # Spring Boot, Gradle, Dockerfile
 ├── ansible/
-│   ├── ansible.cfg
-│   ├── inventory/hosts.ini    # App Server 3대와 SSH 사용자
-│   ├── playbooks/             # deploy.yml, ping.yml
-│   └── roles/
-│       ├── app/              # 이미지 전달, 컨테이너 교체, 빌드 정보 검증
-│       └── nginx/            # 개인 설정 템플릿, 공통 잠금, 검사 및 복구
+│   ├── inventory/hosts.ini
+│   ├── playbooks/
+│   │   ├── deploy.yml           # week6 최초 기본 배포
+│   │   ├── canary-state.yml     # 활성 슬롯·기존 API 검증 및 로컬 스냅샷
+│   │   ├── canary-app.yml       # 지정 서버의 비활성 슬롯만 배포
+│   │   ├── canary-route.yml     # 검증된 대상과 가중치를 Nginx에 적용
+│   │   ├── canary-commit.yml    # 최종 검증 후 활성 슬롯 기록
+│   │   └── canary-recover.yml   # 기존 라우팅·상태 복원 및 복구 검증
+│   ├── tasks/canary-backends.yml # Ansible에서 슬롯·가중치 계산
+│   └── roles/{app,nginx}/
 ├── scripts/
-│   ├── gradle-in-docker.sh    # JDK 25 컨테이너에서 Gradle 실행
-│   ├── test-image.sh          # 배포 이미지 실행 테스트
-│   └── verify.py              # 상태와 빌드 메타데이터 검증
+│   ├── observe.py               # HTTP 관찰·비율 검증·가용성 집계 전용
+│   ├── verify.py                # 단일 버전 API 검증(이미지 실행 테스트)
+│   ├── test-image.sh
+│   └── gradle-in-docker.sh
+├── tests/                       # 단위·실제 로컬 HTTP·Ansible 보호 조건 테스트
 └── Jenkinsfile
 ```
 
-## 로컬 빌드
+## Jenkins 설정
 
-저장소 루트에서 실행한다.
+- 기존 개인 배포 Job의 SCM Branch: `*/week7/taehyeon` (원격에 브랜치 반영 후 설정)
+- Pipeline Script Path: `practice/taehyeon/Jenkinsfile`
+- Agent Label: `ansible-agent`
+- SSH Credential ID: `taehyeon-appserver-ssh`, SSH Agent 플러그인 필요
+- 동일 서비스를 배포하는 개인 Job은 하나만 사용한다. `disableConcurrentBuilds()`는 같은 Job의 동시 실행을 막는다.
+- Agent: Docker, Python 3, Ansible 필요. JDK 25 컨테이너에서 Gradle을 실행한다.
+- App 3대와 Nginx: `taehyeon` SSH 계정, 공개키 및 기존 비밀번호 없는 sudo 권한 필요.
+- Agent의 known_hosts에 App 서버 3대와 Nginx의 검증된 호스트 키가 있어야 한다. host key 검사를 끄지 않는다.
+- Nginx에서 각 App 서버의 20001/21001에 접근 가능해야 한다. 두 슬롯을 동시에 실행할 자원이 필요하다.
+
+| Parameter | 기본값 | 의미 |
+| --- | --- | --- |
+| OBSERVE_SECONDS | 60 | baseline·각 단계·복구 관찰 시간(초) |
+| MIN_SAMPLES | 100 | 각 관찰에서 필요한 최소 `/version` 응답 수 |
+| MAX_RESPONSE_MS | 2000 | 개별 HTTP 요청의 최대 허용 응답 시간(ms) |
+
+관찰은 약 0.1초 간격으로 `/health`, `/version`을 순서대로 요청한다.
+관찰 시간이 끝났는데 표본이 부족하면 실패한다. 파라미터는 양의 정수여야 한다.
+Jenkins의 로컬 테스트에는 Ansible/Jinja2가 같은 Python 환경에 있어야 한다.
+배포 결과는 `.canary/reports/`에 생성하고 성공·실패와 관계없이 Jenkins Artifact로 보관한다.
+이미지 태그는 `build-빌드번호-SHA앞12자리`이며 모든 서버에 같은 이미지를 전달한다.
+
+## 최초 실행 전 baseline
+
+기존 week6 기본 배포가 App 3대와 Nginx에서 정상이어야 한다.
+상태 파일이 없으면 A(20001)를 조회하고, 세 서버의 두 API가 동일 메타데이터를 반환해야 한다.
+Nginx를 통한 baseline 관찰도 통과해야 앱 변경을 시작한다.
+아직 기본 배포가 없다면 week6 브랜치/기존 파이프라인에서 먼저 배포한다.
+`deploy.yml`은 최초 기본 배포용이며, week7 승격 이후에는 실행하지 않는다.
+
+## 카나리 실행 순서
+
+| 단계 | 기존 버전 | 신규 버전 |
+| --- | --- | --- |
+| 10% | 기존 슬롯 3대, 각각 weight 3 | app1 신규 슬롯, weight 1 |
+| 50% | 기존 슬롯 3대, 각각 weight 1 | app1/2/3 신규 슬롯, 각각 weight 1 |
+| 100% | upstream에서 제외, 컨테이너 유지 | 신규 슬롯 3대, 각각 weight 1 |
+
+Jenkins 화면에 아래 작업이 각각 Stage로 표시된다.
+
+1. **Check Existing Service**: Ansible이 Nginx의 `/var/lib/taehyeon-deploy/state.json`을 읽고 실제 기존 API와 비교한다. HTTP baseline 관찰을 통과해야 배포를 시작한다.
+2. **Deploy Candidate to app1**: Ansible이 app1의 비활성 슬롯에 새 이미지를 배포하고 두 API를 검사한다.
+3. **Canary 10%**: Ansible이 가중치를 계산하고 Nginx에서 대상별 API를 검사한 뒤 설정을 적용한다. HTTP 관찰을 통과해야 다음 Stage로 간다.
+4. **Deploy Candidate to app2 and app3**: 같은 이미지를 나머지 두 서버의 비활성 슬롯에도 배포한다.
+5. **Canary 50% / Canary 100%**: 단계마다 Ansible로 전환하고 HTTP 응답을 검사한다.
+6. **Record Successful Promotion**: 배포와 지속 관찰의 두 병렬 분기가 모두 성공해야 Ansible로 활성 슬롯과 새 메타데이터를 원자적으로 저장한다.
+
+10/50% 관찰에서는 기존·신규 릴리스별 메타데이터와 허용 인스턴스를 검사한다.
+신규 응답 비율은 목표 ±5%p 범위여야 하고 모든 라우팅 대상이 관찰되어야 한다.
+비율과 대상별 응답 수는 `/health`와 `/version`의 모든 응답으로 집계한다.
+100%에서는 신규 릴리스만 허용하고 세 인스턴스 모두 응답해야 한다.
+각 요청의 버전·SHA·릴리스는 한 세트로 비교하며 `/health`와 `/version`이 같은 서버에 도착한다고 가정하지 않는다.
+
+단계 관찰 외에도 Jenkins의 **Continuous HTTP Observation** 병렬 분기가 앱 변경 전부터 최종 전환 검증까지 지속 요청을 보낸다.
+배포 분기는 `monitor.ready`를 기다리고 종료·실패·취소 시 `monitor.stop`을 기록한다.
+HTTP 감시가 실패하면 `failFast`로 배포 분기를 중단하며, 승격 기록 단계는 실행하지 않는다.
+HTTP/메타데이터 오류나 응답 시간 초과가 있으면 승격하지 않는다.
+`proxy_next_upstream off`로 upstream 오류를 다른 서버 재시도로 가리지 않는다.
+
+## 관측 결과
+
+각 관찰의 `.jsonl`은 요청 시각·경로·HTTP 결과·버전·서버·응답 시간을 기록한다.
+같은 이름의 `.summary.json`에는 요청 수, 실패 수, 성공률, 최대 응답 시간, 릴리스·서버별 응답 수를 저장한다.
+단계별 보고서에는 신규 응답 비율과 `/version` 표본 수도 포함된다. 실패 관찰도 원본과 요약을 남긴다.
+`whole-rollout.summary.json`은 실제 관측 구간의 결과이며 서비스 전체 시간의 가용성을 보증하지 않는다.
+
+## 실패와 복구
+
+- baseline 실패: 앱이나 Nginx 설정을 변경하지 않고 중단한다.
+- 신규 슬롯 배포 실패: 후속 배포를 중단하며 기존 슬롯 컨테이너는 유지한다.
+- 트래픽 적용 이후 실패: 기존 슬롯 100%로 설정하고 상태 파일을 이전 값으로 복원한 뒤 기존 메타데이터 응답을 검증한다.
+- 최종 상태 저장 실패도 같은 복구 절차를 수행한다.
+- 복구 실패: 배포 오류는 Jenkins 로그에 남고, `result.json`에 복구 오류를 추가한다. 복구가 성공해도 원래 배포는 실패로 유지한다.
+
+Jenkins의 실패·취소 후 처리(`post unsuccessful`)에서 Ansible 복구 Playbook을 실행한다.
+첫 트래픽 변경 전에 `recovery-needed.json`을 기록하고, 정상 승격 또는 복구 관찰을 통과해야 삭제한다.
+복구는 `canary-recover.yml`이 라우팅 0% 적용 → 기존 상태 기록 → HTTP 검증 순서로 수행한다. 새 SSH 인증을 사용하며, 복구에 실패하면 마커를 유지한다.
+다음 빌드에서도 이 파일이 남아 있으면 신규 배포를 중단하고 복구부터 수행한다.
+SIGKILL, Agent 유실, 네트워크 단절에서는 복구 완료를 보장할 수 없다.
+이때 Agent workspace 또는 Artifact의 복구 파일과 실제 응답을 확인한다.
+SSH Credential이 제공된 Agent workspace에서 다음 명령으로 저장된 복구를 재시도할 수 있다.
+
+```bash
+cd practice/taehyeon/ansible
+ansible-playbook -i inventory/hosts.ini playbooks/canary-recover.yml \
+  -e @../.canary/reports/deployment-vars.json \
+  -e @../.canary/reports/recovery-needed.json
+```
+
+복구 Playbook을 사용할 수 없으면 `recovery-vars.json`, `previous-state-vars.json`으로 아래 작업을 수행하고,
+기존 버전의 두 API와 세 인스턴스가 정상인지 별도로 검증한다. 복구 파일을 삭제해 신규 배포를 강행하지 않는다.
+
+```bash
+cd practice/taehyeon/ansible
+ansible-playbook -i inventory/hosts.ini playbooks/canary-route.yml \
+  -e @../.canary/reports/recovery-vars.json
+# 라우팅 검사가 통과하면 상태 기록도 복원
+ansible-playbook -i inventory/hosts.ini playbooks/canary-commit.yml \
+  -e @../.canary/reports/previous-state-vars.json
+```
+
+상태 파일과 실제 API가 다르면 다음 배포는 중단된다. 파일을 삭제해 우회하지 않는다.
+이전 슬롯은 다음 배포의 복구 기준이므로 자동 정리하지 않는다.
+Nginx reload는 기존 공통 잠금 `/var/lock/nginx-cicd.lock`을 사용한다.
+다른 사람의 배포도 동일 잠금을 사용해야 공통 reload를 직렬화할 수 있다.
+
+## 로컬 검증
+
+표준 라이브러리 테스트(실제 로컬 HTTP 서버 포함):
+
+```bash
+python3 -m unittest discover -s practice/taehyeon/tests -p 'test_observe*.py'
+```
+
+Ansible/Jinja2가 같은 Python 환경에 있는 경우 전체 테스트를 실행한다.
+로컬 검증은 Ansible Core 2.19 / Python 3.11에서 수행한다. 공유 Agent에는 테스트 때문에 패키지를 임의로 설치하지 않는다.
+
+```bash
+python3 -m unittest discover -s practice/taehyeon/tests -p 'test_*.py'
+cd practice/taehyeon/ansible
+ansible-playbook -i inventory/hosts.ini playbooks/deploy.yml --syntax-check
+for playbook in canary-state canary-app canary-route canary-commit canary-recover; do
+  ansible-playbook -i inventory/hosts.ini "playbooks/$playbook.yml" --syntax-check
+done
+```
+
+Ansible 보호 조건·가중치 테스트는 `--tags validate` / `--tags plan`으로 VM 변경 없이 실행한다. Handler 테스트는 로컬 임시 디렉터리에서 외부 서비스 명령을 대체한다.
+실제 배포에서는 `--tags`로 일부 작업만 실행하지 않는다.
+Nginx 설정 적용·복구 스크립트 테스트는 `flock`/GNU install이 있는 Linux에서 실행한다.
+
+```bash
+bash practice/taehyeon/tests/test-nginx-config.sh
+sh practice/taehyeon/scripts/gradle-in-docker.sh test bootJar
+```
+
+## 빌드와 이미지 테스트
 
 ```bash
 cd practice/taehyeon/app
 ./gradlew test bootJar
 docker build -t taehyeon-app:local .
-```
-
-## Docker 이미지 실행 테스트
-
-저장소 루트에서 실행한다. Docker와 Python 3가 필요하다.
-
-```bash
+cd ../../..
 sh practice/taehyeon/scripts/test-image.sh taehyeon-app:local local local local
 ```
 
-임시 컨테이너에 자동 배정된 로컬 포트로 접속해 `/health`의 `UP` 상태와
-두 API의 버전·Git SHA·릴리스·인스턴스를 검사한다. 앱 시작은 최대 90초 기다린다.
-실패하면 컨테이너 로그를 출력하며, 성공 여부와 관계없이 임시 컨테이너를 제거한다.
-Jenkins에서는 Docker Build → Docker Image Test → Docker Save 순서로 실행하므로
-이미지 실행 테스트가 실패하면 서버 배포를 진행하지 않는다.
-
-## Jenkins 연결
-
-- 브랜치: `week6/taehyeon`
-- Pipeline Script Path: `practice/taehyeon/Jenkinsfile`
-- Agent Label: `ansible-agent` (실제 VM 2의 Label과 일치해야 한다)
-- SSH Credential ID: `taehyeon-appserver-ssh`
-- Jenkinsfile의 `sshagent` 단계에는 SSH Agent 플러그인이 필요하다.
-- Agent에는 Docker, Python 3, Ansible이 필요하다. 테스트와 JAR 빌드는 JDK 25 컨테이너에서 실행하므로 Agent에 Java 25를 설치할 필요가 없다.
-- App Server 포트: `20001`, Nginx 포트: `18001`
-- 앱 배포·검증 후 nginx Role이 개인 설정을 적용하고, Jenkins가 Nginx를 통해 최종 검증한다.
-
-## Ansible 문법 확인
-
-```bash
-cd practice/taehyeon/ansible
-ansible-playbook -i inventory/hosts.ini playbooks/deploy.yml --syntax-check
-```
-
-이미지는 Jenkins Agent에서 tar 파일로 저장한 뒤 App Server 3대로 전달한다.
-SSH 개인키는 Jenkins Credentials에서 관리하며 저장소에 넣지 않는다.
-
-## 빌드 메타데이터 검증
-
-Jenkins는 버전에 빌드 번호, Git SHA에 체크아웃한 커밋의 전체 해시,
-릴리스에 `build-빌드번호-SHA앞12자리`를 사용한다.
-Docker 빌드 인자로 이미지의 환경 변수에 저장하므로 이미지 테스트와 서버 배포에서
-같은 정보를 사용한다. `/health`와 `/version`은 `version`, `gitSha`, `release`,
-`instance`를 반환하며 `/health`에는 `status: UP`도 포함한다.
-
-이미지 테스트, App Server 3대의 Ansible 검증, Nginx를 통한 최종 검증에서
-메타데이터가 다르면 배포 파이프라인이 실패한다. Nginx 검증은 응답한 서버의
-정보를 검사하며, 세 서버 각각의 검증은 Ansible이 수행한다.
-
-## Agent의 Java 버전과 독립적으로 빌드
-
-Jenkins의 Test와 Build 단계는 `eclipse-temurin:25-jdk` 컨테이너에서
-Gradle Wrapper를 실행한다. Agent의 Java가 21이어도 프로젝트의 Java 25를 유지한다.
-Docker Hub, Gradle 배포 서버와 Maven Central에 접근할 수 있어야 한다.
-
-저장소 루트에서 같은 빌드를 실행할 수 있다.
-
-```bash
-sh practice/taehyeon/scripts/gradle-in-docker.sh test
-sh practice/taehyeon/scripts/gradle-in-docker.sh bootJar
-```
-
-앱 디렉터리를 컨테이너에 연결하므로 생성된 JAR은 기존 `app/build/libs/`에 남고,
-다음 Docker Build 단계가 그대로 사용한다. Agent의 UID/GID로 실행해 결과물이
-root 소유가 되는 것을 방지하며, Gradle 캐시는 `app/.gradle/ci-cache/`에 보관한다.
-컨테이너는 종료 시 자동 제거된다. Agent 작업 디렉터리는 Docker daemon에서도
-동일한 호스트 경로로 접근할 수 있어야 한다.
-
-App Server의 Docker 작업(이미지 로드, 기존 컨테이너 확인·삭제, 컨테이너 실행)은
-`become: true`로 실행한다. SSH 접속 계정 `taehyeon`에 비밀번호 없는 sudo 권한이
-미리 허용되어 있어야 하며, 이 설정 자체가 서버 계정에 권한을 부여하지는 않는다.
-이미지 파일 복사와 API 검증은 기존 SSH 계정으로 실행한다.
-
-## Nginx Role
-
-`roles/nginx/`의 defaults, template, tasks와 적용 스크립트로 개인 설정을 관리한다.
-App Server 3대의 배포가 모두 성공해야 Nginx Play가 실행된다.
-`1.201.116.156:18001`에서 세 App Server의 `20001` 포트로 요청을 분산한다.
-
-Nginx 서버의 `taehyeon` 계정에도 SSH 공개키와 비밀번호 없는 sudo 권한이 필요하다.
-서버에 설치된 Nginx가 `/etc/nginx/conf.d/*.conf`를 포함하고, `flock` 및 systemctl을
-사용할 수 있어야 한다. Nginx 설치나 서비스 재시작은 수행하지 않는다.
-
-설정은 `/tmp/taehyeon-nginx/`에 먼저 생성한다. Nginx 서버에서 세 앱의 상태와
-빌드 정보를 확인한 뒤 공통 잠금 `/var/lock/nginx-cicd.lock` 안에서 개인 설정의
-백업·적용·`nginx -t`·reload를 실행한다. 검사나 reload가 실패하면 개인 설정을
-복구하고 파이프라인을 실패 처리한다. 설정이 같으면 reload하지 않는다.
-다른 배포도 같은 잠금을 사용해야 동시 적용을 막을 수 있다.
-공용 Nginx 설정 적용·reload는 스터디 운영 규칙에 맞춰 조율한다.
-
-적용 스크립트의 로컬 테스트는 Linux 환경에서 실행한다.
-
-```bash
-bash practice/taehyeon/tests/test-nginx-config.sh
-```
+`/health`는 `status: UP`과 `version`, `gitSha`, `release`, `instance`를 반환하고,
+`/version`은 같은 빌드 메타데이터를 반환한다. 새 이미지 실행 테스트에서 실패하면 VM 배포를 진행하지 않는다.

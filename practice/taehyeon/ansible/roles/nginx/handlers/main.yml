@@ -1,0 +1,13 @@
+---
+# 잠금·백업·검사·reload·실패 시 설정 복구를 하나의 스크립트로 실행한다.
+- name: Apply personal Nginx configuration
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - "{{ nginx_stage_dir }}/apply-config.sh"
+      - "{{ nginx_stage_dir }}/taehyeon.conf"
+      - "{{ nginx_config_path }}"
+      - "{{ nginx_stage_dir }}/taehyeon.conf.bak"
+      - "{{ nginx_lock_path }}"
+  register: nginx_apply
+  changed_when: "'RELOADED' in nginx_apply.stdout"

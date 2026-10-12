@@ -1,0 +1,43 @@
+---
+# 대상별 API를 검증한 뒤 개인 Nginx 설정에 이번 단계의 가중치를 적용한다.
+- name: Apply a verified traffic stage to personal Nginx config
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Require either an explicit list or a traffic stage
+      ansible.builtin.assert:
+        that:
+          - nginx_backends is defined or traffic_percent is defined
+          - not (nginx_backends is defined and traffic_percent is defined)
+      tags: [plan, validate]
+
+    - name: Calculate the stage's slots and weights in Ansible
+      ansible.builtin.import_tasks: ../tasks/canary-backends.yml
+      when: traffic_percent is defined
+      tags: [plan, validate]
+
+    - name: Use the calculated traffic plan
+      ansible.builtin.set_fact:
+        nginx_backends: "{{ canary_backends }}"
+      when: traffic_percent is defined
+      tags: [plan, validate]
+
+    - name: Require explicit backend list for canary routing
+      ansible.builtin.assert:
+        that:
+          - nginx_backends is defined
+          - nginx_backends | length > 0
+      tags: [validate]
+    - name: Export the exact targets for HTTP observation on the Agent
+      ansible.builtin.copy:
+        content: "{{ nginx_backends | to_nice_json }}"
+        dest: "{{ backend_snapshot_path }}"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+      when: backend_snapshot_path is defined
+      tags: [plan]
+  roles:
+    - nginx

@@ -1,5 +1,11 @@
 ---
-app_host_port: 20001 # 고태현에게 할당된 App Server 포트
+app_name: taehyeon-app
+# 두 슬롯은 같은 서버에서 서로 다른 포트를 사용한다.
+app_slot_ports:
+  a: 20001
+  b: 21001
+# 슬롯을 지정하지 않는 기존 week6 배포는 20001과 기존 컨테이너 이름을 사용한다.
+app_host_port: "{{ app_slot_ports[deploy_slot] if deploy_slot is defined else 20001 }}"
 app_container_port: 8080 # Spring Boot 컨테이너 내부 포트
-app_container_name: "{{ app_name }}"
+app_container_name: "{{ app_name ~ '-' ~ deploy_slot if deploy_slot is defined else app_name }}"
 image_tar_remote: "/tmp/{{ app_name }}-{{ image_tag }}.tar"
