@@ -1,3 +1,32 @@
+def notifyDiscord(String status) {
+  try {
+    withCredentials([string(credentialsId: 'doyeon-discord-webhook', variable: 'DISCORD_WEBHOOK')]) {
+      withEnv([
+        "NOTIFY_STATUS=${status}",
+        "NOTIFY_DURATION=${currentBuild.durationString.replace(' and counting', '')}"
+      ]) {
+        sh '''
+          set +x
+          python3 - <<'PY' | curl -sS -m 10 -H 'Content-Type: application/json' -d @- "$DISCORD_WEBHOOK" || true
+import json, os
+e = os.environ.get
+lines = [
+    "[doyeon] " + e("NOTIFY_STATUS", ""),
+    "Job: " + e("JOB_NAME", "") + " #" + e("BUILD_NUMBER", ""),
+    "모드: " + e("DEPLOY_MODE", "-") + " / 버전: " + e("APP_VERSION", "-") + " (release " + e("RELEASE_ID", "-") + ")",
+    "소요 시간: " + e("NOTIFY_DURATION", ""),
+    e("BUILD_URL", ""),
+]
+print(json.dumps({"content": "\\n".join(lines), "allowed_mentions": {"parse": []}}))
+PY
+        '''
+      }
+    }
+  } catch (err) {
+    echo "Discord notification skipped: ${err.class.simpleName}"
+  }
+}
+
 pipeline {
   agent { label 'ansible-agent' }
   options {
@@ -105,5 +134,8 @@ PY
         rm -rf "$WORKSPACE/.doyeon-docker-config"
       '''
     }
+    success { script { notifyDiscord('✅ 성공') } }
+    failure { script { notifyDiscord('❌ 실패') } }
+    aborted { script { notifyDiscord('⚠️ 중단') } }
   }
 }
