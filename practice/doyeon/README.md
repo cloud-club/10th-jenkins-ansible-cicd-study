@@ -21,8 +21,8 @@ Controller 1.201.117.194와 Agent 1.201.116.180은 배포 대상이 아니다. �
 ## 사전 준비
 
 1. Jenkins 개인 Folder에 Pipeline Job을 만들고 SCM Script Path를 practice/doyeon/Jenkinsfile로 지정한다. Agent label이 다르면 Jenkinsfile에서 바꾼다.
-2. Jenkins Credentials에 Docker Hub Username/Token (ID: doyeon-dockerhub), 앱 서버와 Nginx에 접속할 SSH 키 (ID: doyeon-app-ssh)를 등록한다. 키와 토큰을 Git에 저장하지 않는다.
-3. Docker Hub에 공개 저장소 계정명/doyeon-app을 만든다. 이 예제는 App 서버에서 공개 이미지를 pull한다.
+2. Jenkins Credentials에 Docker Hub Username/Token (ID: doyeon-dockerhub, 사용자명: dodopoo), 앱 서버와 Nginx에 접속할 SSH 키 (ID: doyeon-app-ssh)를 등록한다. 키와 토큰을 Git에 저장하지 않는다.
+3. Docker Hub에 공개 저장소 dodopoo/doyeon-app을 만든다. Jenkins는 처음부터 이 저장소 이름으로 이미지를 빌드·Push하고, App 서버는 공개 이미지를 pull한다.
 4. App 서버에 Docker, LB에 Nginx가 이미 있어야 한다. SSH 접속 계정 doyeon에는 필요한 비밀번호 없는 sudo 권한이 있어야 한다. 공용 패키지 설치·Docker 재시작은 자동화하지 않는다.
 5. Nginx 개인 설정 추가와 reload는 공용 Nginx에 영향을 줄 수 있으므로 스터디원에게 먼저 공유하고 동시 변경을 피한다.
 
@@ -41,13 +41,23 @@ Jenkinsfile에 DEPLOY_MODE 파라미터를 추가한 뒤 처음 실행하는 빌
 
        python3 practice/doyeon/scripts/probe.py --duration 180 --output rolling-results.csv
 
-3. 프로브 실행 중 APP_VERSION=v2, DEPLOY_MODE=rolling으로 Jenkins 빌드를 실행한다. 각 서버를 개인 upstream에서 한 대씩 제외 → Nginx 검사·reload → 컨테이너 교체 → 직접 /health·/version 검증 → upstream 복귀·reload한다.
+3. 프로브 실행 중 APP_VERSION=v2, DEPLOY_MODE=rolling, ROLLING_BATCH_SIZE=1로 Jenkins 빌드를 실행한다. 각 서버를 개인 upstream에서 한 대씩 제외 → Nginx 검사·reload → 컨테이너 교체 → 직접 /health·/version 검증 → upstream 복귀·reload한다.
 4. CSV에서 HTTP 실패 수가 0인지, 전환 중 v1·v2가 관찰되는지, instance가 3대에 분산되는지 확인한다. 완료 후 각 App 서버의 20005 포트를 직접 조회해 모두 v2인지 확인한다.
+
+### 두 대씩 배포 실험
+
+Jenkins의 `ROLLING_BATCH_SIZE` 기본값은 `1`이다. `DEPLOY_MODE=rolling`, `ROLLING_BATCH_SIZE=2`를 선택하면 앱1·앱2를 한 배치에서 교체한 뒤 앱3을 교체한다. 각 배치의 Nginx 설정 변경은 `run_once` 작업 하나가 `ansible_play_batch` 목록을 차례대로 수정하고, 검사·reload도 한 번씩 수행한다. 앱 컨테이너 교체와 직접 헬스체크는 배치 내 서버에서 병렬 실행한다.
+
+두 대를 제외한 동안에는 남은 한 대만 요청을 처리한다. 현재 3대 구성에서는 그 서버가 실패하거나 용량이 부족하면 요청 실패가 생길 수 있으므로 먼저 기본값 `1`로 확인하고, 실험할 때 `probe.py` 결과와 Jenkins Console Output을 함께 기록한다. 현재 구현은 자동 롤백을 제공하지 않는다.
+
+터미널에서 문법만 확인하려면 Agent의 `practice/doyeon/ansible` 디렉터리에서 다음처럼 실행한다. 이 명령은 서버에 배포하지 않는다.
+
+       ansible-playbook playbooks/rolling.yml --syntax-check -e rolling_batch_size=2
 
 ## 실패 처리와 범위
 
 - 시작 전에 App 3대의 /health를 확인한다. 하나라도 실패하면 롤링을 시작하지 않는다.
-- 배포·검증 실패 시 이후 서버를 배포하지 않으며 실패한 서버를 upstream에서 제외한 채 둔다. 확인 없이 재등록하지 않는다.
+- 배포·검증 실패 시 이후 배치를 시작하지 않는다. 실패 시점에 따라 해당 배치의 Nginx 설정과 실제 트래픽 상태가 다를 수 있으므로 두 상태를 확인한 뒤 수동으로 복구한다. `ROLLING_BATCH_SIZE=2`에서는 두 서버가 함께 제외된 상태로 남을 수 있다.
 - 자동 롤백은 과제 문서의 3주차 범위다. 이번 구현에는 없다.
 - 상태 없는 데모 앱으로 HTTP 요청을 검증한다. 긴 요청, WebSocket, 세션, DB 스키마 변경이 있는 실제 앱은 별도 검증이 필요하다.
 - 이미지 태그는 Jenkins 빌드 번호로 구분한다. 운영용 고정 식별에는 이미지 digest 사용이 더 적합하다.

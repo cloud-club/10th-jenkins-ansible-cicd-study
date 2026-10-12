@@ -36,10 +36,12 @@ pipeline {
   parameters {
     string(name: 'APP_VERSION', defaultValue: 'v1', description: 'v1 또는 v2')
     choice(name: 'DEPLOY_MODE', choices: ['bootstrap', 'rolling'], description: '첫 배포 또는 롤링 배포')
+    choice(name: 'ROLLING_BATCH_SIZE', choices: ['1', '2'], description: '롤링 배포 시 동시에 교체할 앱 서버 수')
   }
   environment {
     APP_VERSION = "${params.APP_VERSION}"
     DEPLOY_MODE = "${params.DEPLOY_MODE}"
+    ROLLING_BATCH_SIZE = "${params.ROLLING_BATCH_SIZE ?: '1'}"
   }
   stages {
     stage('Checkout') {
@@ -52,13 +54,14 @@ pipeline {
             error('Invalid APP_VERSION')
           }
           env.RELEASE_ID = "${params.APP_VERSION}-${env.BUILD_NUMBER}"
+          env.IMAGE_REF = "dodopoo/doyeon-app:${env.RELEASE_ID}"
         }
         dir('practice/doyeon/app') {
           sh 'python3 -m unittest test_main.py -v'
           sh '''
             docker build --build-arg APP_VERSION="$APP_VERSION" \
               --build-arg RELEASE_ID="$RELEASE_ID" \
-              -t "doyeon-app:$RELEASE_ID" .
+              -t "$IMAGE_REF" .
           '''
         }
       }
@@ -70,13 +73,11 @@ pipeline {
           usernameVariable: 'DOCKER_USER',
           passwordVariable: 'DOCKER_TOKEN'
         )]) {
-          script { env.IMAGE_REF = "${env.DOCKER_USER}/doyeon-app:${env.RELEASE_ID}" }
           sh '''
             set +x
             export DOCKER_CONFIG="$WORKSPACE/.doyeon-docker-config"
             mkdir -p "$DOCKER_CONFIG"
             printf '%s' "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
-            docker tag "doyeon-app:$RELEASE_ID" "$IMAGE_REF"
             docker push "$IMAGE_REF"
             docker logout
           '''
@@ -102,7 +103,8 @@ pipeline {
               ansible-playbook "playbooks/$DEPLOY_MODE.yml" \
                 -e "image_ref=$IMAGE_REF" \
                 -e "app_version=$APP_VERSION" \
-                -e "release_id=$RELEASE_ID"
+                -e "release_id=$RELEASE_ID" \
+                -e "rolling_batch_size=$ROLLING_BATCH_SIZE"
             '''
           }
         }
@@ -129,8 +131,9 @@ PY
   post {
     always {
       sh '''
-        [ -n "$RELEASE_ID" ] && docker rmi "doyeon-app:$RELEASE_ID" || true
-        [ -n "$IMAGE_REF" ] && docker rmi "$IMAGE_REF" || true
+        if [ -n "${IMAGE_REF:-}" ]; then
+          docker image rm "$IMAGE_REF" || true
+        fi
         rm -rf "$WORKSPACE/.doyeon-docker-config"
       '''
     }
