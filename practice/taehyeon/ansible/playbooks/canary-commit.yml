@@ -6,6 +6,7 @@
   become: true
   any_errors_fatal: true
   tasks:
+    # 저장할 상태를 직접 전달하지 않았다면, 현재 활성 슬롯이 A/B 중 하나인지 먼저 확인한다.
     - name: Require an explicit current slot before deriving a new state
       ansible.builtin.assert:
         that:
@@ -13,6 +14,8 @@
       when: deployment_state is not defined
       tags: [validate]
 
+    # 배포 성공 시 반대 슬롯과 신규 버전 정보를, 복구 시 이전 슬롯과 버전 정보를 선택한다.
+    # deployment_state를 직접 전달한 경우에는 그 값을 그대로 사용한다.
     - name: Select promoted state when no explicit recovery state is supplied
       ansible.builtin.set_fact:
         deployment_state:
@@ -21,6 +24,7 @@
       when: deployment_state is not defined
       tags: [validate]
 
+    # 저장할 슬롯과 버전·커밋 SHA·릴리스 정보가 올바르고 비어 있지 않은지 검사한다.
     - name: Validate personal state
       ansible.builtin.assert:
         that:
@@ -33,6 +37,7 @@
           - deployment_state.metadata.release | length > 0
       tags: [validate]
 
+    # 선택한 상태를 Jenkins 결과 확인용 파일로 Agent에 저장한다(localhost는 Ansible 실행 서버).
     - name: Export the selected state for the Jenkins result report
       ansible.builtin.copy:
         content: "{{ deployment_state | to_nice_json }}"
@@ -43,6 +48,7 @@
       when: canary_report_dir is defined
       tags: [plan]
 
+    # Nginx VM에 활성 슬롯 정보를 계속 보관할 디렉터리를 만든다.
     - name: Create personal persistent deployment directory
       ansible.builtin.file:
         path: /var/lib/taehyeon-deploy
@@ -51,6 +57,8 @@
         group: root
         mode: '0755'
 
+    # Nginx VM의 state.json을 원자적으로 교체한다. 다음 배포는 이 파일로 활성 슬롯을 판단한다.
+    # 실제 트래픽 전환은 canary-route.yml에서 수행하며, 여기서는 상태만 기록한다.
     - name: Atomically save active slot and build metadata
       ansible.builtin.copy:
         content: "{{ deployment_state | to_nice_json }}"
