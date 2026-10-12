@@ -1,4 +1,6 @@
-// Jenkins가 순서를 제어하고, 원격 작업과 슬롯·가중치 계산은 Ansible에 맡긴다.
+// Agent에서 SSH 인증을 연결하고 지정한 Ansible Playbook을 실행한다.
+// 이번 배포 정보·단계별 변수·이전 배포 상태를 전달해 앱 배포, 트래픽 전환, 복구 등에 사용한다.
+// stateFile이 빈 문자열이면 이전 상태 파일을 전달하지 않는다(최초 상태 조회용).
 def runCanaryPlaybook(String playbook, Map variables = [:], String stateFile = 'previous-state.json') {
     writeFile file: "${env.REPORT_DIR}/step-vars.json", text: groovy.json.JsonOutput.toJson(variables)
     sshagent(credentials: ['taehyeon-appserver-ssh']) {
@@ -18,7 +20,9 @@ def runCanaryPlaybook(String playbook, Map variables = [:], String stateFile = '
     }
 }
 
-// 관찰 도구는 HTTP 요청과 집계만 한다. 실패하면 Jenkins가 다음 Stage를 중단한다.
+// Agent에서 observe.py의 stage 모드를 실행해 배포 전 또는 10%·50%·100% 전환 후 응답을 관찰한다.
+// targets는 예상 서버·버전 목록, percent는 신규 버전 목표 비율, report는 결과 파일 이름이다.
+// HTTP 오류·응답 지연·트래픽 비율 등을 검사하며, 실패하면 Jenkins가 다음 배포 단계를 중단한다.
 def observeCanaryStage(String targets, int percent, String report) {
     withEnv(["BACKENDS_FILE=${targets}", "TRAFFIC_PERCENT=${percent}", "OBSERVATION_NAME=${report}",
              "OBSERVE_SECONDS=${params.OBSERVE_SECONDS}", "MIN_SAMPLES=${params.MIN_SAMPLES}",
