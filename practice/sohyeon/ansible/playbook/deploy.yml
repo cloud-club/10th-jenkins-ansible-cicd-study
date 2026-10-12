@@ -1,8 +1,186 @@
-# 앱 서버에 app role을 실행하는 배포 플레이북
+# 파일 역할: 한 서버씩 트래픽 제외·연결 종료 대기·교체·검증·복귀를 마치는 Rolling 배포와 실패 시 중단을 제어한다.
 ---
-- name: Deploy Sohyeon CI/CD application
+# Rolling의 핵심: 한 서버의 제외→drain→교체→검증→복귀 전체를 끝낸 뒤 다음 서버로.
+# 한 서버의 배포 전체를 완료한 뒤 다음 서버로 진행하고 실패하면 전체 후속 배포를 중단한다.
+- name: ROLLING deployment - one complete server at a time
   hosts: app_servers
   gather_facts: false
+  become: false
+  pre_tasks:
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/runtime"
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/ownership"
+  strategy: linear
+  serial: 1
+  order: sorted
+  any_errors_fatal: true
+  tasks:
+    # 배포 대상을 제외하기 전에 나머지 두 서버가 요청을 처리할 수 있는지 검사한다.
+    - name: Check the other two servers before removing this one
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/verification"
+      vars:
+        check_host: "{{ other_server }}"
+        check_from: "{{ lb_host }}"
+        check_url: "http://{{ hostvars[other_server].ansible_host }}:{{ host_port }}"
+        expected_release: ""
+      loop: "{{ groups['app_servers'] | difference([inventory_hostname]) }}"
+      loop_control:
+        loop_var: other_server
 
-  roles:
-    - role: "{{ playbook_dir }}/../roles/app"
+    # 서버 제외 직전 LB 경유 health 응답이 정상인지 확인한다.
+    - name: Check LB availability before removing this server
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lb_port }}/health"
+        return_content: true
+        timeout: "{{ request_timeout }}"
+      delegate_to: "{{ lb_host }}"
+      register: before_health
+      failed_when: before_health.status != 200 or before_health.content | default('') | trim != 'OK'
+
+    # 대상을 트래픽에서 제외하기 전에 새 이미지가 해당 서버에 준비되어 있는지 확인한다.
+    - name: Confirm the prepared image exists before excluding traffic
+      community.docker.docker_image_info:
+        docker_host: unix:///var/run/docker.sock
+        name: "{{ image_name }}:{{ image_tag }}"
+      register: prepared_image
+      become: true
+      failed_when: prepared_image.images | length != 1
+      no_log: true
+
+    # 제외 전 워커의 PID와 시작 시각을 기록해 reload 뒤 종료 여부를 비교한다.
+    - name: ROLLING 1 - Remember all existing Nginx workers
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/nginx_workers.py", snapshot, "{{ nginx_pid }}"]
+      become: true
+      delegate_to: "{{ lb_host }}"
+      register: old_workers
+      changed_when: false
+
+    # 현재 배포 대상 한 대만 upstream에서 down으로 표시한다.
+    - name: ROLLING 1 - Exclude only this server from Nginx
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/nginx_lb"
+        apply:
+          delegate_to: "{{ lb_host }}"
+      vars:
+        excluded_hosts: "{{ [inventory_hostname] }}"
+
+    # 서버 제외 설정을 즉시 적용한 뒤 기존 요청 종료를 기다리도록 한다.
+    - name: Reload now before waiting for old requests
+      ansible.builtin.meta: flush_handlers
+
+    # 기존 워커가 요청을 마치고 종료되었으며 새 워커가 실행 중인지 확인한다.
+    - name: ROLLING 2 - Wait for old Nginx workers to finish requests
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ remote_tools }}/nginx_workers.py"
+          - wait
+          - "{{ nginx_pid }}"
+          - "{{ old_workers.stdout }}"
+          - "{{ drain_timeout | string }}"
+      become: true
+      delegate_to: "{{ lb_host }}"
+      changed_when: false
+
+    # 앱 포트에 처리 중인 연결이 남아 있지 않을 때까지 제한 시간 안에서 기다린다.
+    - name: ROLLING 2 - Confirm no active connections remain on the app port
+      ansible.builtin.wait_for:
+        host: 0.0.0.0
+        port: "{{ host_port }}"
+        state: drained
+        active_connection_states: [ESTABLISHED, SYN_SENT, SYN_RECV, FIN_WAIT1, FIN_WAIT2]
+        timeout: "{{ drain_timeout }}"
+
+    # 연결이 종료된 서버를 교체·검증·재등록하며 실패 시 제외 처리와 중단 경로로 이동한다.
+    - name: Replace and verify the drained server
+      block:
+        # app Role을 호출해 기존 컨테이너를 검사된 새 이미지로 교체한다.
+        - name: ROLLING 3 - Replace the application container
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/app"
+
+        # 대상 서버 내부에서 새 앱의 상태·릴리스·서버 ID를 한 차례 검사한다.
+        - name: ROLLING 4 - Verify the new app locally once
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/verification"
+          vars:
+            check_host: "{{ inventory_hostname }}"
+            check_from: "{{ inventory_hostname }}"
+            check_url: "http://127.0.0.1:{{ host_port }}"
+            expected_release: "{{ image_tag }}"
+
+        # LB에서 대상 앱으로 직접 요청해 네트워크 경로와 새 릴리스를 함께 검사한다.
+        - name: ROLLING 4 - Verify the network path from LB to this server
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/verification"
+          vars:
+            check_host: "{{ inventory_hostname }}"
+            check_from: "{{ lb_host }}"
+            check_url: "http://{{ hostvars[inventory_hostname].ansible_host }}:{{ host_port }}"
+            expected_release: "{{ image_tag }}"
+
+        # 검증을 통과한 서버를 upstream에 다시 등록한다.
+        - name: ROLLING 5 - Rejoin this verified server
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/nginx_lb"
+            apply:
+              delegate_to: "{{ lb_host }}"
+          vars:
+            excluded_hosts: []
+
+        # 재등록 설정을 즉시 반영해 해당 서버가 요청을 받을 수 있게 한다.
+        - name: Reload now to restore traffic
+          ansible.builtin.meta: flush_handlers
+
+        # LB를 경유한 응답에서 현재 서버 ID와 목표 릴리스를 실제로 관측할 때까지 확인한다.
+        - name: ROLLING 6 - Prove this server handles real LB traffic
+          ansible.builtin.uri:
+            url: "http://127.0.0.1:{{ lb_port }}/"
+            return_content: true
+            timeout: "{{ request_timeout }}"
+          delegate_to: "{{ lb_host }}"
+          register: rejoined
+          retries: 30
+          delay: 1
+          until: >-
+            rejoined.status == 200 and
+            rejoined.json.server_id | default('') == inventory_hostname and
+            rejoined.json.release_id | default('') == image_tag and
+            rejoined.json.ready | default(false) | bool
+
+        # 재등록 후 반복 검사와 대기를 수행해 다음 서버 배포 전에 상태를 관찰한다.
+        - name: ROLLING 6 - Observe this server and LB before proceeding
+          ansible.builtin.include_tasks: observe.yml
+          loop: "{{ range(rejoin_checks | int) | list }}"
+          loop_control:
+            loop_var: observation
+
+        # 현재 서버의 배포 완료를 로그에 남기고 다음 서버 진행을 허용한다.
+        - name: ROLLING COMPLETE - Next server may now begin
+          ansible.builtin.debug:
+            msg: "{{ inventory_hostname }} now serves {{ image_tag }} through Nginx"
+
+      rescue:
+        # 실패한 서버를 다시 제외하거나 제외 상태로 유지하며 이전 버전 롤백은 수행하지 않는다.
+        - name: Keep the failed server out of traffic (no Week3 rollback)
+          ansible.builtin.include_role:
+            name: "{{ playbook_dir }}/../roles/nginx_lb"
+            apply:
+              delegate_to: "{{ lb_host }}"
+          vars:
+            excluded_hosts: "{{ [inventory_hostname] }}"
+
+        # 실패 서버의 제외 설정을 즉시 reload한다.
+        - name: Apply the exclusion immediately
+          ansible.builtin.meta: flush_handlers
+
+        # 제외 처리가 성공했어도 원래 배포 실패를 반환해 다음 서버가 배포되지 않게 한다.
+        - name: Stop the whole rollout even if exclusion succeeded
+          ansible.builtin.fail:
+            msg: "{{ inventory_hostname }} failed at {{ ansible_failed_task.name }}. Next servers are NOT deployed. Inspect this server before retrying."
+
+# 서버별 배포가 모두 끝나면 전체 서버와 LB의 최종 검증을 실행한다.
+- ansible.builtin.import_playbook: verify.yml

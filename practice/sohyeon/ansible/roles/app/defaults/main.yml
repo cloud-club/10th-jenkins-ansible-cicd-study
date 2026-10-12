@@ -1,10 +1,5 @@
-# 앱 컨테이너명·이미지·포트 등 배포 변수 기본값
+# 파일 역할: 앱 교체 Role에서 사용하는 이미지 태그와 tar 경로의 기본값을 정의한다.
 ---
-app_name: sohyeon-cicd-app
-
-image_name: sohyeon-cicd-app
-image_tag: latest
+# image_tag와 image_tar는 Jenkins가 빌드한 릴리스 값으로 전달한다.
+image_tag: ""
 image_tar: ""
-
-host_port: 20007
-container_port: 80

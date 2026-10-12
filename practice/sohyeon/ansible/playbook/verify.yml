@@ -1,34 +1,55 @@
-# Nginx를 통한 앱 상태와 배포 버전 검증
+# 파일 역할: 전체 배포가 끝난 뒤 모든 서버의 목표 버전, upstream 등록 상태, LB 경유 응답을 최종 확인한다.
 ---
-- name: Verify Sohyeon deployment through Nginx
+# 모든 앱 서버를 대상으로 최종 목표 릴리스 검사를 실행한다.
+- name: Verify every server is on the target release
+  hosts: app_servers
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    # LB에서 각 앱 서버로 직접 요청해 전체 서버가 목표 릴리스인지 확인한다.
+    - name: Verify the final fleet directly from LB
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/verification"
+      vars:
+        check_host: "{{ inventory_hostname }}"
+        check_from: "{{ lb_host }}"
+        check_url: "http://{{ hostvars[inventory_hostname].ansible_host }}:{{ host_port }}"
+        expected_release: "{{ image_tag }}"
+
+# 최종 upstream 등록 상태와 LB 경유 서비스 응답을 확인한다.
+- name: Verify the final LB configuration and service
   hosts: load_balancer
   gather_facts: false
-
+  become: false
+  any_errors_fatal: true
   tasks:
-    - name: Check health through Nginx
-      ansible.builtin.uri:
-        url: "http://127.0.0.1:18007/health"
-        status_code: 200
-        return_content: true
-      register: health_response
+    # 배포가 끝난 뒤 프로젝트 Nginx 설정을 읽는다.
+    - name: Read the final Nginx configuration
+      ansible.builtin.slurp:
+        src: "{{ nginx_config }}"
+      register: final_nginx
 
-    - name: Verify health response
+    # 제외 표시가 없고 세 서버의 주소와 포트가 인벤토리와 일치하는지 검사한다.
+    - name: Confirm all three upstreams are registered
       ansible.builtin.assert:
         that:
-          - health_response.content | trim == "OK"
-        fail_msg: "Nginx health check failed"
-        success_msg: "Nginx health check passed"
+          - "' down' not in (final_nginx.content | b64decode | regex_replace('(?m)#.*$', ''))"
+          - "(final_nginx.content | b64decode | regex_findall('server\\s+([0-9.]+):' ~ (host_port | string) ~ ';') | sort) == (groups['app_servers'] | map('extract', hostvars, 'ansible_host') | sort)"
 
-    - name: Check version through Nginx
+    # LB를 통해 실제 서비스 응답을 요청한다.
+    - name: Verify the target release through Nginx
       ansible.builtin.uri:
-        url: "http://127.0.0.1:18007/version"
-        status_code: 200
+        url: "http://127.0.0.1:{{ lb_port }}/"
         return_content: true
-      register: version_response
+        timeout: "{{ request_timeout }}"
+      register: final_response
 
-    - name: Verify deployed version
+    # LB 응답의 준비 상태·버전·릴리스·서버 ID가 배포 목표와 일치하는지 검사한다.
+    - name: Confirm target response
       ansible.builtin.assert:
         that:
-          - version_response.content | trim == ('v' ~ image_tag)
-        fail_msg: "Unexpected version through Nginx"
-        success_msg: "Version v{{ image_tag }} verified through Nginx"
+          - final_response.json.ready | bool
+          - final_response.json.release_id == image_tag
+          - final_response.json.version == app_version
+          - final_response.json.server_id in groups['app_servers']

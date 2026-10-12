@@ -1,20 +1,25 @@
-# 개인 수신 포트와 인벤토리 앱 서버의 요청 분산 설정 템플릿
+# 파일 역할: 인벤토리와 제외 목록으로 Nginx upstream·수신 포트·프록시·요청 로그 설정을 생성한다.
+# Ansible이 관리하며 배포 중인 서버 한 대만 down으로 표시한다.
+# 요청 시각·응답 상태·실제 처리 서버 주소를 프로젝트 전용 로그 형식으로 기록한다.
+log_format sohyeon_rolling '$time_iso8601 status=$status upstream=$upstream_addr upstream_status=$upstream_status request_time=$request_time';
+# 인벤토리의 앱 서버를 등록하고 현재 제외 대상만 요청 분산에서 뺀다.
 upstream sohyeon_backend {
 {% for host in groups['app_servers'] %}
-    server {{ hostvars[host]['ansible_host'] }}:20007;
+    server {{ hostvars[host]['ansible_host'] }}:{{ host_port }}{% if host in excluded_hosts %} down{% endif %};
 {% endfor %}
 }
-
+# 외부 요청을 전용 포트에서 받아 정상 앱 서버로 전달한다.
 server {
-    listen 18007;
+    listen {{ lb_port }};
     server_name _;
-
+    access_log /var/log/nginx/sohyeon-access.log sohyeon_rolling;
+    # 원래 요청 정보를 전달하고 처리 서버 주소를 응답 헤더에 표시한다.
     location / {
         proxy_pass http://sohyeon_backend;
-
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        add_header X-Upstream-Addr $upstream_addr always;
     }
 }

@@ -1,3 +1,4 @@
+# 파일 역할: 인증 자료·배포 산출물·Python 캐시가 Git에 포함되지 않도록 제외 규칙을 관리한다.
 .artifacts/
 .ssh/
 
@@ -6,3 +7,8 @@
 *.key
 
 .env
+__pycache__/
+*.pyc
+
+# Project-local Galaxy collections and cache
+.ansible/

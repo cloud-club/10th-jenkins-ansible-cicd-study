@@ -1,0 +1,49 @@
+---
+- name: Remove one validated project resource
+  block:
+    - name: Recheck ownership and live references immediately before removal
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/cleanup.py", check-item, --scope, "{{ cleanup_scope }}", --release, "{{ image_tag }}", --plan, "{{ remote_state }}/cleanup-plan.json", --result, "{{ remote_state }}/cleanup-result.json", --index, "{{ cleanup_index | string }}"]
+      changed_when: false
+
+    - name: Reject unsupported remote cleanup resource kinds
+      ansible.builtin.assert:
+        that: cleanup_item.kind in ['image', 'file']
+
+    - name: Remove exactly the approved image without force or parent pruning
+      community.docker.docker_image_remove:
+        docker_host: unix:///var/run/docker.sock
+        name: "{{ cleanup_item.ref }}"
+        force: false
+        prune: false
+      become: true
+      when: cleanup_item.kind == 'image'
+      no_log: true
+
+    - name: Limit privileged deletion to the assigned Nginx temporary paths
+      ansible.builtin.assert:
+        that:
+          - >-
+            cleanup_item.path == '/etc/nginx/sohyeon.candidate' or
+            cleanup_item.path is match('^/etc/nginx/conf.d/sohyeon\.conf\.\d+\.\d{4}-\d{2}-\d{2}@\d{2}:\d{2}:\d{2}~$')
+      when: cleanup_item.kind == 'file' and cleanup_scope == 'lb'
+
+    - name: Remove the recorded temporary file
+      ansible.builtin.file:
+        path: "{{ cleanup_item.path }}"
+        state: absent
+      become: "{{ cleanup_scope == 'lb' }}"
+      when: cleanup_item.kind == 'file'
+
+    - name: Journal this successful deletion
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/cleanup.py", record-deleted, --scope, "{{ cleanup_scope }}", --release, "{{ image_tag }}", --plan, "{{ remote_state }}/cleanup-plan.json", --result, "{{ remote_state }}/cleanup-result.json", --index, "{{ cleanup_index | string }}"]
+      changed_when: false
+  rescue:
+    - name: Journal the failed module and preserve partial results
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/cleanup.py", record-failure, --scope, "{{ cleanup_scope }}", --release, "{{ image_tag }}", --plan, "{{ remote_state }}/cleanup-plan.json", --result, "{{ remote_state }}/cleanup-result.json", --error, "Failed task: {{ ansible_failed_task.name }}"]
+      changed_when: false
+    - name: Stop cleanup after a module failure
+      ansible.builtin.fail:
+        msg: "Cleanup failed on {{ inventory_hostname }}. Inspect the archived cleanup result before retrying."

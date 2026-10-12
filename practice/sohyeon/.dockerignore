@@ -1,0 +1,12 @@
+# 파일 역할: Docker 빌드에 불필요한 문서·테스트·배포 설정·임시 파일을 빌드 컨텍스트에서 제외한다.
+.git
+.artifacts
+.ssh
+__pycache__
+**/__pycache__
+tests
+ansible
+docs
+scripts
+
+.ansible/

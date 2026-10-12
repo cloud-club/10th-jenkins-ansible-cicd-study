@@ -1,0 +1,27 @@
+# 파일 역할: 재등록한 서버와 LB의 응답을 반복 검사해 다음 서버 배포 전에 안정성을 확인한다.
+---
+# LB에서 재등록한 앱에 직접 접근해 새 버전의 상태가 유지되는지 검사한다.
+- name: Observe the new release directly from LB
+  ansible.builtin.include_role:
+    name: "{{ playbook_dir }}/../roles/verification"
+  vars:
+    check_host: "{{ inventory_hostname }}"
+    check_from: "{{ lb_host }}"
+    check_url: "http://{{ hostvars[inventory_hostname].ansible_host }}:{{ host_port }}"
+    expected_release: "{{ image_tag }}"
+    health_retries: 1
+
+# 구버전과 신버전이 공존하는 동안 LB health 응답이 정상인지 확인한다.
+- name: Observe the LB service during rolling version coexistence
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ lb_port }}/health"
+    return_content: true
+    timeout: "{{ request_timeout }}"
+  delegate_to: "{{ lb_host }}"
+  register: observed_lb
+  failed_when: observed_lb.status != 200 or observed_lb.content | default('') | trim != 'OK'
+
+# 반복 검사 사이에 지정한 시간만큼 기다려 재등록 후 상태를 관찰한다.
+- name: Space the stability checks
+  ansible.builtin.pause:
+    seconds: "{{ rejoin_delay }}"

@@ -1,0 +1,37 @@
+---
+- name: Read the deployment account home without privilege escalation
+  ansible.builtin.setup:
+    gather_subset: ['!all', '!min', env, user]
+- name: Require a non-root deployment account
+  ansible.builtin.assert:
+    that:
+      - ansible_user_uid | int != 0
+      - ansible_env.HOME.startswith('/')
+      - remote_project_dir == ansible_env.HOME ~ '/.local/share/sohyeon-cicd'
+    fail_msg: Use the agreed non-root deployment account; this pipeline does not grant Docker access.
+- name: Create private project directories owned by the deployment account
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0700'
+  loop:
+    - "{{ remote_project_dir }}"
+    - "{{ remote_tools }}"
+    - "{{ remote_state }}"
+    - "{{ remote_tar_dir }}"
+- name: Install the unprivileged cleanup policy helper
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/cleanup.py"
+    dest: "{{ remote_tools }}/cleanup.py"
+    mode: '0700'
+
+- name: Install Nginx helpers only on the load balancer
+  ansible.builtin.copy:
+    src: "{{ role_path }}/../nginx_lb/files/{{ item }}"
+    dest: "{{ remote_tools }}/{{ item }}"
+    mode: '0700'
+  become: false
+  loop:
+    - nginx_workers.py
+    - nginx_candidate.py
+  when: inventory_hostname in groups.get('load_balancer', [])

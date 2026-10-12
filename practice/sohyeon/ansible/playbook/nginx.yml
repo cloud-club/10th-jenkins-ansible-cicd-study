@@ -1,8 +1,8 @@
-# 로드밸런서에 nginx_lb role을 실행하는 Nginx 설정 플레이북
+# 별도 설치 파일 없이 기존 Ansible become 권한으로 개인 설정만 적용한다.
 ---
-- name: Configure Sohyeon Nginx load balancer
+- name: Apply the project config using the preinstalled restricted command
   hosts: load_balancer
   gather_facts: false
-
-  roles:
-    - role: "{{ playbook_dir }}/../roles/nginx_lb"
+  tasks:
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/nginx_lb"
