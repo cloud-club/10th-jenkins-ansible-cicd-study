@@ -1,0 +1,9 @@
+---
+owner: taewook
+app_container: taewook-app
+app_port: 20004
+lb_port: 18004
+app_stage: /tmp/taewook-cicd
+nginx_conf: /etc/nginx/conf.d/taewook.conf
+nginx_stage: /tmp/taewook-cicd/taewook.conf
+nginx_lock: /var/lock/nginx-cicd.lock

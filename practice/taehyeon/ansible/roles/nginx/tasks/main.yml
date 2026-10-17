@@ -1,0 +1,119 @@
+---
+- name: Validate personal Nginx deployment scope
+  ansible.builtin.assert:
+    that:
+      - ansible_host == '1.201.116.156'
+      - nginx_listen_port | int == 18001
+      - nginx_backend_port | int == 20001
+      - nginx_config_path == '/etc/nginx/conf.d/taehyeon.conf'
+      - nginx_stage_dir == '/tmp/taehyeon-nginx'
+      - nginx_lock_path == '/var/lock/nginx-cicd.lock'
+      - groups['app_servers'] | length == 3
+      - nginx_backends is defined or (app_version is defined and git_sha is defined and release_id is defined)
+  tags: [validate]
+  # 다른 사용자의 포트와 설정을 변경하지 않도록 대상 확인
+
+- name: Initialize explicit backend targets
+  ansible.builtin.set_fact:
+    nginx_targets: "{{ nginx_backends | default([]) }}"
+  tags: [validate]
+
+- name: Build week6 backend targets when no canary list is supplied
+  ansible.builtin.set_fact:
+    nginx_targets: "{{ nginx_targets + [{'host':item, 'port':nginx_backend_port | int, 'weight':1, 'metadata':{'version':app_version | string, 'gitSha':git_sha, 'release':release_id}}] }}"
+  loop: "{{ groups['app_servers'] }}"
+  when: nginx_backends is not defined
+  tags: [validate]
+
+- name: Validate every personal backend before rendering configuration
+  ansible.builtin.assert:
+    that:
+      - item.host in groups['app_servers']
+      - item.port in [20001, 21001]
+      - item.weight is integer
+      - item.weight > 0
+      - item.weight <= 100
+      - item.metadata.version is string
+      - item.metadata.gitSha is string
+      - item.metadata.release is string
+      - item.metadata.version | length > 0
+      - item.metadata.gitSha | length > 0
+      - item.metadata.release | length > 0
+  loop: "{{ nginx_targets }}"
+  tags: [validate]
+
+- name: Verify each routed health endpoint from Nginx
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item.host].ansible_host }}:{{ item.port }}/health"
+    status_code: 200
+    return_content: true
+    timeout: 5
+  loop: "{{ nginx_targets }}"
+  register: backend_health
+  failed_when: >-
+    backend_health.status | default(0) != 200 or
+    (backend_health.json | default({})).get('status') != 'UP' or
+    (backend_health.json | default({})).get('version') != item.metadata.version or
+    (backend_health.json | default({})).get('gitSha') != item.metadata.gitSha or
+    (backend_health.json | default({})).get('release') != item.metadata.release or
+    (backend_health.json | default({})).get('instance') != item.host
+
+- name: Verify each routed version endpoint from Nginx
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item.host].ansible_host }}:{{ item.port }}/version"
+    status_code: 200
+    return_content: true
+    timeout: 5
+  loop: "{{ nginx_targets }}"
+  register: backend_version
+  failed_when: >-
+    backend_version.status | default(0) != 200 or
+    (backend_version.json | default({})).get('version') != item.metadata.version or
+    (backend_version.json | default({})).get('gitSha') != item.metadata.gitSha or
+    (backend_version.json | default({})).get('release') != item.metadata.release or
+    (backend_version.json | default({})).get('instance') != item.host
+
+- name: Create personal Nginx staging directory
+  ansible.builtin.file:
+    path: "{{ nginx_stage_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Render personal configuration outside conf.d
+  ansible.builtin.template:
+    src: taehyeon.conf.j2
+    dest: "{{ nginx_stage_dir }}/taehyeon.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  # 검증 전 설정이 다른 사람의 reload에 포함되지 않도록 임시 경로에 생성
+
+- name: Copy configuration apply script
+  ansible.builtin.copy:
+    src: apply-config.sh
+    dest: "{{ nginx_stage_dir }}/apply-config.sh"
+    owner: root
+    group: root
+    mode: '0750'
+
+- name: Check whether the live config differs from the staged config
+  ansible.builtin.command:
+    argv: [cmp, -s, "{{ nginx_stage_dir }}/taehyeon.conf", "{{ nginx_config_path }}"]
+  register: nginx_config_compare
+  changed_when: false
+  failed_when: nginx_config_compare.rc not in [0, 1, 2]
+  tags: [apply]
+
+- name: Request atomic configuration apply when the live config differs
+  ansible.builtin.debug:
+    msg: Apply personal Nginx configuration under the shared lock.
+  changed_when: nginx_config_compare.rc != 0
+  notify: Apply personal Nginx configuration
+  tags: [apply]
+
+# 적용·검사·reload 전체를 Handler 안의 공통 잠금으로 보호하고 관찰 전에 즉시 실행한다.
+- name: Apply traffic changes before returning to Jenkins observation
+  ansible.builtin.meta: flush_handlers
+  tags: [apply]

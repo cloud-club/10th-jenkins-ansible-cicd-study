@@ -1,0 +1,55 @@
+---
+- name: 트래픽을 받지 않는 포트에 후보 배포
+  hosts: app
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  serial: 1
+  vars:
+    app_port: "{{ candidate_port }}"
+    app_container: "taewook-app-{{ candidate_port }}"
+  pre_tasks:
+    - name: 할당된 후보 포트 확인
+      ansible.builtin.assert:
+        that:
+          - candidate_port | int in [20004, 21004]
+          - stable_port | int in [20004, 21004]
+          - candidate_port | int != stable_port | int
+    # 1주차 컨테이너는 첫 포트 재사용 때만 정리한다.
+    - name: 기존 이름의 컨테이너 확인
+      community.docker.docker_container_info:
+        name: taewook-app
+      register: legacy
+      when: candidate_port | int == 20004
+    - name: 기존 이름의 소유권 확인
+      ansible.builtin.assert:
+        that:
+          - not legacy.exists or (legacy.container.Config.Labels | default({}, true)).get('owner') == 'taewook'
+      when: candidate_port | int == 20004
+    - name: 비활성 포트의 1주차 컨테이너 정리
+      community.docker.docker_container:
+        name: taewook-app
+        state: absent
+      when: candidate_port | int == 20004 and legacy.exists
+  roles:
+    - app
+
+- name: Nginx에서 후보 서버 접근 확인
+  hosts: lb
+  gather_facts: false
+  become: true
+  tasks:
+    - name: 후보 서버 세 대의 응답 확인
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host }}:{{ candidate_port }}/health"
+        return_content: true
+        timeout: 5
+      loop: "{{ groups['app'] }}"
+      register: candidate
+      failed_when: >-
+        candidate.status != 200 or
+        (candidate.json | default({})).get('status') != 'ok' or
+        (candidate.json | default({})).get('release') != release_id or
+        (candidate.json | default({})).get('git_sha') != git_sha or
+        (candidate.json | default({})).get('version') != app_version or
+        (candidate.json | default({})).get('instance') != item

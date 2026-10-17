@@ -1,0 +1,20 @@
+---
+# 배포 감사 로그: LB의 audit_log 파일에 이벤트를 한 줄(JSON)씩 덧붙인다.
+# 측정 CSV(Mac)와 시각을 맞춰 "언제 어느 서버가 빠졌고, 그동안 요청 실패가 있었나"를 대조하는 용도.
+# 시각은 Agent 기준 KST.
+#
+# 부르는 쪽에서 넘기는 값: audit_event (필수), audit_extra (선택, dict)
+
+- name: Audit log
+  ansible.builtin.shell: "echo {{ audit_line | quote }} >> {{ audit_log }}"
+  vars:
+    audit_line: >-
+      {{ {'ts': now().strftime('%Y-%m-%d %H:%M:%S'),
+          'build': build_id | default('manual') | string,
+          'tag': image_tag | default(''),
+          'host': inventory_hostname,
+          'event': audit_event}
+         | combine(audit_extra | default({})) | to_json }}
+  delegate_to: "{{ groups['lb'][0] }}"
+  become: true
+  changed_when: false

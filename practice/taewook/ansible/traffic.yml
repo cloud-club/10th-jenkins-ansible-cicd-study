@@ -1,0 +1,7 @@
+---
+- name: 개인 서비스 트래픽 변경
+  hosts: lb
+  gather_facts: false
+  become: true
+  roles:
+    - traffic

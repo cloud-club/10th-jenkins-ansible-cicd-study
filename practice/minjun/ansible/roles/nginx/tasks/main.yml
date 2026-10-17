@@ -1,0 +1,17 @@
+---
+# site.yml(최초 배포)에서 쓰는 진입점. lb 그룹 play에서 실행된다.
+
+- name: LB can reach each app server on {{ nginx_active_port }}
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ nginx_active_port }}/health"
+    status_code: 200
+    timeout: 5
+  loop: "{{ groups['app'] }}"
+
+- name: Render and compare
+  ansible.builtin.import_tasks: render.yml
+
+- name: Nothing to apply
+  ansible.builtin.debug:
+    msg: "UNCHANGED (live conf already matches)"
+  when: not nginx_cmp.changed

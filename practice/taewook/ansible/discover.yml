@@ -1,0 +1,54 @@
+---
+- name: 현재 서비스와 후보 포트 확인
+  hosts: lb
+  gather_facts: false
+  become: true
+  tasks:
+    - name: 개인 Nginx 설정 읽기
+      ansible.builtin.slurp:
+        src: "{{ nginx_conf }}"
+      register: current_conf
+    - name: 활성 포트 추출
+      ansible.builtin.set_fact:
+        active_ports: "{{ current_conf.content | b64decode | regex_findall('server [^;\\n]+:(20004|21004)') | unique | list }}"
+    - name: 혼합 상태에서는 새 배포 중단
+      ansible.builtin.assert:
+        that:
+          - active_ports | length == 1
+        fail_msg: 이전 배포가 진행 중이거나 복구가 필요합니다. 개인 Nginx 설정을 확인하세요.
+    - name: 배포 포트 선택
+      ansible.builtin.set_fact:
+        stable_port: "{{ active_ports[0] | int }}"
+        candidate_port: "{{ 21004 if active_ports[0] == '20004' else 20004 }}"
+    - name: 기존 서버 세 대 확인
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host }}:{{ stable_port }}/health"
+        return_content: true
+        timeout: 5
+      loop: "{{ groups['app'] }}"
+      register: stable
+      failed_when: >-
+        stable.status != 200 or
+        (stable.json | default({})).get('status') != 'ok' or
+        (stable.json | default({})).get('service') != 'taewook-app' or
+        (stable.json | default({})).get('instance') != item
+    - name: 기존 서버 버전 일치 확인
+      ansible.builtin.assert:
+        that:
+          - stable.results | map(attribute='json.release') | unique | list | length == 1
+          - stable.results | map(attribute='json.git_sha') | unique | list | length == 1
+          - stable.results | map(attribute='json.version') | unique | list | length == 1
+    - name: 이전 설정을 빌드별로 보관
+      ansible.builtin.copy:
+        content: "{{ current_conf.content | b64decode }}"
+        dest: "{{ playbook_dir }}/../build/previous.conf"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+    - name: 측정과 복구에 사용할 기준 저장
+      ansible.builtin.copy:
+        content: "{{ {'stable_port': stable_port | int, 'candidate_port': candidate_port | int, 'stable_release': stable.results[0].json.release, 'stable_version': stable.results[0].json.version, 'stable_sha': stable.results[0].json.git_sha} | to_nice_json }}"
+        dest: "{{ playbook_dir }}/../build/state.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false

@@ -1,0 +1,8 @@
+# 별도 설치 파일 없이 기존 Ansible become 권한으로 개인 설정만 적용한다.
+---
+- name: Apply the project config using the preinstalled restricted command
+  hosts: load_balancer
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/nginx_lb"

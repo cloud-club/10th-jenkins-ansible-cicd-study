@@ -1,0 +1,219 @@
+# 파일 역할: 현재 앱·LB·디스크를 검사하고 모든 앱 서버에 검사된 이미지를 미리 전달해 배포를 준비한다.
+---
+# Jenkins는 이 playbook이 성공한 뒤에만 Rolling Deploy를 실행한다.
+# 모든 앱 서버의 현재 상태를 확인하고 실행 중인 앱을 유지한 채 새 이미지를 준비한다.
+- name: Preflight and prepare the tested image on every app server
+  hosts: app_servers
+  gather_facts: false
+  any_errors_fatal: true
+  become: false
+  pre_tasks:
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/runtime"
+  tasks:
+    # 서버 수, 버전 형식, 이미지 태그와 tar 경로가 배포 조건에 맞는지 검사한다.
+    - name: Validate deployment inputs and inventory
+      ansible.builtin.assert:
+        that:
+          - groups['app_servers'] | length == 3
+          - groups['load_balancer'] | length == 1
+          - image_tag is match('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$')
+          - app_version is match('^v[0-9]+$')
+          - image_tar | length > 0
+
+    - name: Confirm ownership before preparing a deployment
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/ownership"
+
+    # LB에서 각 앱 서버로 직접 접근해 현재 서비스가 정상인지 확인한다.
+    - name: Check the current service from the load balancer
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/verification"
+      vars:
+        check_host: "{{ inventory_hostname }}"
+        check_from: "{{ lb_host }}"
+        check_url: "http://{{ hostvars[inventory_hostname].ansible_host }}:{{ host_port }}"
+        expected_release: ""
+
+    # 변경 전 릴리스를 호스트 변수에 기록해 서버 간 시작 버전을 비교할 수 있게 한다.
+    - name: Record the current release before changing anything
+      ansible.builtin.set_fact:
+        previous_release: "{{ service_response.json.release_id | default(version_response.content | trim) }}"
+
+    # 최초 전환을 제외한 일반 배포는 세 서버의 시작 릴리스가 같을 때만 허용한다.
+    - name: Require a consistent starting release for normal v1 to v2 tests
+      ansible.builtin.assert:
+        that:
+          - bootstrap | bool or groups['app_servers'] | map('extract', hostvars, 'previous_release') | unique | list | length == 1
+        fail_msg: "Mixed starting releases: inspect the previous deployment before retrying."
+      run_once: true
+
+    # Galaxy 모듈의 Python requests 의존성과 Docker 연결도 교체 전에 확인한다.
+    - name: Inspect the existing container with community.docker
+      community.docker.docker_container_info:
+        docker_host: unix:///var/run/docker.sock
+        name: "{{ app_name }}"
+      register: current_container
+      become: true
+      no_log: true
+
+    - name: Require the existing application to be running
+      ansible.builtin.assert:
+        that:
+          - current_container.exists
+          - current_container.container.State.Running | bool
+        fail_msg: Existing application must be running before preparation.
+
+    - name: Preserve previous healthy image and private container configuration
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/cleanup.py", snapshot, --release, "{{ image_tag }}"]
+      environment:
+        SOHYEON_DOCKER_SUDO: '1'
+      no_log: true
+      changed_when: true
+
+    # 이미지 tar가 저장될 /tmp 파일시스템의 남은 공간을 조회한다.
+    - name: Check free space for the image tar
+      ansible.builtin.command:
+        argv: [df, -Pm, "{{ remote_tar_dir }}"]
+      register: temp_space
+      changed_when: false
+
+    # Jenkins Agent에 있는 이미지 tar의 존재 여부와 크기를 읽는다.
+    - name: Read local image artifact size
+      ansible.builtin.stat:
+        path: "{{ image_tar }}"
+      delegate_to: localhost
+      register: artifact
+
+    # 원격 /tmp에 tar 크기와 여유 공간을 합친 용량이 확보되어 있는지 확인한다.
+    - name: Require room for the artifact
+      ansible.builtin.assert:
+        that:
+          - artifact.stat.exists
+          - temp_space.stdout_lines[-1].split()[3] | int > (artifact.stat.size / 1048576) + min_free_mb | int
+
+    # Docker가 이미지와 컨테이너 데이터를 저장하는 디렉터리를 조회한다.
+    - name: Locate Docker storage
+      community.docker.docker_host_info:
+        docker_host: unix:///var/run/docker.sock
+      register: docker_root
+      become: true
+      no_log: true
+
+    # Docker 저장소가 있는 파일시스템의 남은 공간을 확인한다.
+    - name: Check Docker storage space
+      ansible.builtin.command:
+        argv: [df, -Pm, "{{ docker_root.host_info.DockerRootDir }}"]
+      become: true
+      register: docker_space
+      changed_when: false
+
+    # 이미지를 불러오는 데 필요한 예상 용량과 여유 공간을 검사한다.
+    - name: Require room to load the new image
+      ansible.builtin.assert:
+        that:
+          - docker_space.stdout_lines[-1].split()[3] | int > (artifact.stat.size / 1048576) * 2 + min_free_mb | int
+
+    # Jenkins에서 검사한 tar를 각 서버로 복사하고 Ansible의 전송 체크섬 검증을 사용한다.
+    - name: Copy the exact tested image (Ansible verifies transfer checksum)
+      ansible.builtin.copy:
+        src: "{{ image_tar }}"
+        dest: "{{ remote_tar_dir }}/{{ app_name }}-{{ image_tag }}.tar"
+        mode: "0600"
+
+    - name: Record ownership of the tar just copied by this deployment
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/cleanup.py", record, --scope, app, --release, "{{ image_tag }}", --path, "{{ remote_tar_dir }}/{{ app_name }}-{{ image_tag }}.tar"]
+      changed_when: true
+
+    - name: Reject foreign images or tags before privileged image loading
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/cleanup.py", validate-archive, --release, "{{ image_tag }}", --path, "{{ remote_tar_dir }}/{{ app_name }}-{{ image_tag }}.tar"]
+      changed_when: false
+
+    # 기존 컨테이너를 중단하지 않고 전달받은 이미지를 Docker에 불러온다.
+    - name: Load the new image without changing the running container
+      community.docker.docker_image_load:
+        docker_host: unix:///var/run/docker.sock
+        path: "{{ remote_tar_dir }}/{{ app_name }}-{{ image_tag }}.tar"
+      become: true
+
+    # 이미지 로드가 끝나면 이번 릴리스의 원격 임시 tar만 삭제한다.
+    - name: Remove this release's transferred tar after loading
+      ansible.builtin.file:
+        path: "{{ remote_tar_dir }}/{{ app_name }}-{{ image_tag }}.tar"
+        state: absent
+
+    - name: Record that this server completed image preparation
+      ansible.builtin.set_fact:
+        prepared_release: "{{ image_tag }}"
+
+# LB 설정과 서비스 상태를 검사하고 트래픽 관측에 필요한 구성을 준비한다.
+- name: Preflight and prepare the load balancer
+  hosts: load_balancer
+  gather_facts: false
+  any_errors_fatal: true
+  become: false
+  pre_tasks:
+    - name: Require every application server to finish before touching the LB
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].prepared_release | default('') == image_tag
+        fail_msg: "{{ item }} did not complete image preparation. LB preparation is blocked."
+      loop: "{{ groups['app_servers'] }}"
+    - ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/runtime"
+  tasks:
+    # 현재 프로젝트 Nginx 설정 파일을 읽어 등록된 서버와 포트를 확인할 준비를 한다.
+    - name: Read existing project Nginx config
+      ansible.builtin.slurp:
+        src: "{{ nginx_config }}"
+      register: existing_nginx
+
+    # 제외 서버나 예상과 다른 주소·포트가 있으면 설정을 덮어쓰지 않고 중단한다.
+    - name: Refuse to reset an excluded or unexpected upstream
+      ansible.builtin.assert:
+        that:
+          - "' down' not in (existing_nginx.content | b64decode | regex_replace('(?m)#.*$', ''))"
+          - "(existing_nginx.content | b64decode | regex_findall('server\\s+([0-9.]+):' ~ (host_port | string) ~ ';') | sort) == (groups['app_servers'] | map('extract', hostvars, 'ansible_host') | sort)"
+          - "('listen ' ~ (lb_port | string) ~ ';') in (existing_nginx.content | b64decode)"
+        fail_msg: "Nginx differs from the expected three active servers. Inspect it before retrying."
+
+    # 현재 Nginx 전체 설정의 문법이 올바른지 검사한다.
+    - name: Check current Nginx config
+      ansible.builtin.command: nginx -t
+      become: true
+      changed_when: false
+
+    # LB의 health 응답이 200과 OK인지 확인한다.
+    - name: Check current LB service
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lb_port }}/health"
+        return_content: true
+        timeout: "{{ request_timeout }}"
+      register: lb_health
+      failed_when: lb_health.status != 200 or lb_health.content | default('') | trim != 'OK'
+
+    - name: Preserve the checked all-active Nginx configuration
+      ansible.builtin.copy:
+        src: "{{ nginx_config }}"
+        dest: "{{ remote_state }}/nginx.previous.conf"
+        remote_src: true
+        mode: '0600'
+
+    # 실행 중인 Nginx 워커를 읽을 수 있는지 검사해 연결 종료 대기가 가능한지 확인한다.
+    - name: Confirm that Nginx worker observation is available
+      ansible.builtin.command:
+        argv: [python3, "{{ remote_tools }}/nginx_workers.py", snapshot, "{{ nginx_pid }}"]
+      become: true
+      changed_when: false
+
+    # 처리 서버 주소를 기록하는 로그와 응답 헤더가 포함된 Nginx 설정을 설치한다.
+    - name: Install the project config with traffic logging
+      ansible.builtin.include_role:
+        name: "{{ playbook_dir }}/../roles/nginx_lb"
+
+    # 예약된 reload handler를 즉시 실행해 HTTP 측정 전에 설정을 적용한다.
+    - name: Apply the configuration before measurement begins
+      ansible.builtin.meta: flush_handlers

@@ -1,0 +1,191 @@
+def recoveryRequired = false
+
+pipeline {
+    agent { label 'ansible-control' }
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+    }
+    parameters {
+        choice(name: 'VERSION', choices: ['v1', 'v2'], description: '처음에는 v1으로 화면을 준비하고, 다음에 v2로 전환')
+    }
+    environment {
+        PROJECT_DIR = 'practice/taewook'
+        SSH_CREDENTIAL = 'SSH_KeyPair-cc10-cicd.pem'
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                    env.APP_VERSION = params.VERSION ?: 'v1'
+                    if (!(env.APP_VERSION ==~ /[A-Za-z0-9][A-Za-z0-9_.-]{0,30}/)) {
+                        error('VERSION 값을 확인하세요')
+                    }
+                    env.RELEASE_ID = "${env.APP_VERSION}-${env.GIT_SHA.take(12)}-${env.BUILD_NUMBER}"
+                    env.IMAGE_REF = "taewook-app:${env.RELEASE_ID}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.RELEASE_ID}"
+                }
+                dir(env.PROJECT_DIR) {
+                    sh 'mkdir -p build; rm -f build/*.json build/*.jsonl build/*.conf build/monitor.* build/traffic.started'
+                }
+            }
+        }
+        stage('Preflight') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL,
+                    keyFileVariable: 'ANSIBLE_PRIVATE_KEY_FILE', usernameVariable: 'ANSIBLE_REMOTE_USER')]) {
+                    dir("${env.PROJECT_DIR}/ansible") {
+                        sh '''
+                            set -eu
+                            export ANSIBLE_CONFIG="$PWD/ansible.cfg"
+                            docker info --format '{{.ServerVersion}}'
+                            ansible-inventory --graph
+                            ansible-playbook preflight.yml
+                            ansible-playbook discover.yml --syntax-check
+                            ansible-playbook prepare.yml --syntax-check
+                            ansible-playbook traffic.yml --syntax-check
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''
+                        set -eu
+                        python3 -m venv .venv
+                        .venv/bin/pip install -q -r app/requirements-test.txt
+                        .venv/bin/python -m unittest discover -s app -v
+                        python3 -m unittest discover -s scripts -v
+                        docker build --build-arg APP_VERSION="$APP_VERSION" \
+                            --build-arg GIT_SHA="$GIT_SHA" --build-arg RELEASE_ID="$RELEASE_ID" \
+                            --label owner=taewook -t "$IMAGE_REF" .
+                    '''
+                }
+            }
+        }
+        stage('Test') {
+            steps { dir(env.PROJECT_DIR) { sh 'sh scripts/test-image.sh' } }
+        }
+        stage('Package') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+docker save "$IMAGE_REF" | gzip > build/image.tar.gz
+python3 - <<'PY'
+import json, os, subprocess
+image_id = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', os.environ['IMAGE_REF']], text=True).strip()
+data = dict(image_ref=os.environ['IMAGE_REF'], image_id=image_id,
+            app_version=os.environ['APP_VERSION'], git_sha=os.environ['GIT_SHA'],
+            release_id=os.environ['RELEASE_ID'], image_archive=os.path.abspath('build/image.tar.gz'))
+with open('build/deploy-vars.json', 'w') as f:
+    json.dump(data, f, indent=2)
+print('Packaged', data['image_ref'], image_id)
+PY
+'''
+                }
+            }
+        }
+        stage('Discover') {
+            steps { script { playbook('discover.yml', '') } }
+        }
+        stage('Baseline') {
+            steps { dir(env.PROJECT_DIR) { sh 'python3 scripts/observe.py --name baseline --target 0' } }
+        }
+        stage('Canary deployment') {
+            failFast true
+            parallel {
+                stage('HTTP monitor') {
+                    steps {
+                        dir(env.PROJECT_DIR) { sh 'python3 scripts/observe.py --name continuous --continuous' }
+                    }
+                }
+                stage('Traffic rollout') {
+                    stages {
+                        stage('Prepare candidate') {
+                            steps {
+                                script { recoveryRequired = true }
+                                script { playbook('prepare.yml', '-e @../build/state.json') }
+                            }
+                        }
+                        stage('Canary 10%') {
+                            steps { script { traffic(10) } }
+                        }
+                        stage('Approve 50%') {
+                            steps {
+                                // 측정 결과를 확인한 뒤 다음 비율로 전환한다.
+                                timeout(time: 10, unit: 'MINUTES') {
+                                    input message: '10% 결과와 웹 화면을 확인했나요? 50%로 늘립니다.', submitter: 'taewook'
+                                }
+                                dir(env.PROJECT_DIR) { sh 'test ! -f build/monitor.failed' }
+                            }
+                        }
+                        stage('Canary 50%') {
+                            steps { script { traffic(50) } }
+                        }
+                        stage('Approve 100%') {
+                            steps {
+                                timeout(time: 10, unit: 'MINUTES') {
+                                    input message: '50% 결과를 확인했나요? 신규 버전으로 전부 전환합니다.', submitter: 'taewook'
+                                }
+                                dir(env.PROJECT_DIR) { sh 'test ! -f build/monitor.failed' }
+                            }
+                        }
+                        stage('Canary 100%') {
+                            steps { script { traffic(100) } }
+                        }
+                    }
+                    post {
+                        always { dir(env.PROJECT_DIR) { sh 'touch build/monitor.stop' } }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        unsuccessful {
+            script {
+                if (recoveryRequired) {
+                    playbook('traffic.yml', '-e @../build/state.json -e traffic_percent=0')
+                    dir(env.PROJECT_DIR) { sh 'python3 scripts/observe.py --name recovery --target 0' }
+                }
+            }
+        }
+        cleanup {
+            dir(env.PROJECT_DIR) {
+                archiveArtifacts artifacts: 'build/*.json,build/*.jsonl,build/previous.conf', allowEmptyArchive: true
+                sh '''
+                    rm -f build/image.tar.gz
+                    docker rm -f "taewook-test-$BUILD_NUMBER" >/dev/null 2>&1 || true
+                    if [ -n "${IMAGE_REF:-}" ]; then docker image rm "$IMAGE_REF" >/dev/null 2>&1 || true; fi
+                '''
+            }
+        }
+    }
+}
+
+
+def playbook(String file, String extra) {
+    withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CREDENTIAL,
+        keyFileVariable: 'ANSIBLE_PRIVATE_KEY_FILE', usernameVariable: 'ANSIBLE_REMOTE_USER')]) {
+        dir("${env.PROJECT_DIR}/ansible") {
+            sh "ANSIBLE_CONFIG=\"\$PWD/ansible.cfg\" ansible-playbook ${file} -e @../build/deploy-vars.json ${extra}"
+        }
+    }
+}
+
+def traffic(int percent) {
+    dir(env.PROJECT_DIR) { sh 'test ! -f build/monitor.failed' }
+    playbook('traffic.yml', "-e @../build/state.json -e traffic_percent=${percent}")
+    dir(env.PROJECT_DIR) {
+        sh "python3 scripts/observe.py --name canary-${percent} --target ${percent}"
+        sh 'test ! -f build/monitor.failed'
+    }
+}

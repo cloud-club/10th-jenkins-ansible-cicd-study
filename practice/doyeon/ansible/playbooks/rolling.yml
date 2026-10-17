@@ -1,0 +1,131 @@
+---
+- name: Refuse to start when any current backend is unhealthy
+  hosts: app_servers
+  become: false
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Check the direct health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/health"
+        status_code: 200
+        return_content: true
+      register: before_health
+      failed_when: before_health.status != 200 or before_health.json.status != 'ok'
+
+- name: Refuse to start unless all three backends are active in Nginx
+  hosts: load_balancers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Validate the current Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Require exactly one enabled line for each App server
+      ansible.builtin.command:
+        argv:
+          - grep
+          - -Fxc
+          - "    server {{ hostvars[item].ansible_host }}:{{ app_port }};"
+          - "{{ nginx_config }}"
+      loop: "{{ groups['app_servers'] }}"
+      register: active_backend
+      changed_when: false
+      failed_when: active_backend.rc != 0 or active_backend.stdout != '1'
+
+- name: Drain, deploy, check, and rejoin one batch at a time
+  hosts: app_servers
+  become: true
+  gather_facts: false
+  strategy: linear
+  order: sorted
+  serial: "{{ rolling_batch_size | default(1) | int }}"
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Require an explicit image and release
+      ansible.builtin.assert:
+        that:
+          - image_ref is defined
+          - app_version is defined
+          - release_id is defined
+          - image_ref | length > 0
+          - (rolling_batch_size | default(1) | int) in [1, 2]
+          - (rolling_batch_size | default(1) | int) < (groups['app_servers'] | length)
+  tasks:
+    - name: Deploy the current batch
+      block:
+        - name: Drain each backend in this batch without concurrent Nginx edits
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ hostvars[item].ansible_host | regex_escape }}:{{ app_port }};$"
+            line: "    server {{ hostvars[item].ansible_host }}:{{ app_port }} down;"
+            backrefs: true
+          loop: "{{ ansible_play_batch }}"
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+          register: drained
+
+        - name: Stop if an expected enabled upstream line is missing
+          ansible.builtin.assert:
+            that: drained.results | selectattr('changed') | list | length == ansible_play_batch | length
+            fail_msg: "An expected enabled backend line is missing from {{ nginx_config }}; no container was replaced."
+          run_once: true
+
+        - name: Validate Nginx after draining
+          ansible.builtin.command: nginx -t
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+          changed_when: false
+
+        - name: Reload Nginx with this batch drained
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+
+        - name: Allow old Nginx workers to finish active requests
+          ansible.builtin.pause:
+            seconds: 3
+          run_once: true
+
+        - name: Replace and verify the application container
+          ansible.builtin.include_role:
+            name: app
+
+        - name: Return each healthy backend in this batch to the upstream
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ hostvars[item].ansible_host | regex_escape }}:{{ app_port }} down;$"
+            line: "    server {{ hostvars[item].ansible_host }}:{{ app_port }};"
+            backrefs: true
+          loop: "{{ ansible_play_batch }}"
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+          register: rejoined
+
+        - name: Stop if the drained upstream line is missing
+          ansible.builtin.assert:
+            that: rejoined.results | selectattr('changed') | list | length == ansible_play_batch | length
+          run_once: true
+
+        - name: Validate Nginx after rejoining
+          ansible.builtin.command: nginx -t
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+          changed_when: false
+
+        - name: Reload Nginx with the verified backend restored
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+
+      rescue:
+        - name: Stop the rollout and leave an unverified backend out of traffic
+          ansible.builtin.fail:
+            msg: >-
+              Rolling deployment stopped at {{ inventory_hostname }}.
+              Check its direct /health and {{ nginx_config }} before re-enabling traffic.

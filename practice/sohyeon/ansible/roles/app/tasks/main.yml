@@ -1,0 +1,48 @@
+# drain을 마친 서버에만 적용한다. 이미지 pull이나 공용 Docker 설정 변경은 하지 않는다.
+---
+- name: Recheck ownership immediately before stopping the application
+  ansible.builtin.include_role:
+    name: "{{ playbook_dir }}/../roles/ownership"
+- name: ROLLING 3 - Stop the drained container gracefully
+  community.docker.docker_container:
+    docker_host: unix:///var/run/docker.sock
+    name: "{{ app_name }}"
+    state: stopped
+    stop_timeout: 30
+    force_kill: false
+  become: true
+  no_log: true
+
+- name: Remove the stopped container
+  community.docker.docker_container:
+    docker_host: unix:///var/run/docker.sock
+    name: "{{ app_name }}"
+    state: absent
+    force_kill: false
+    keep_volumes: true
+  become: true
+  no_log: true
+
+- name: Start the tested image with this server identity
+  community.docker.docker_container:
+    docker_host: unix:///var/run/docker.sock
+    name: "{{ app_name }}"
+    image: "{{ image_name }}:{{ image_tag }}"
+    state: started
+    pull: never
+    restart_policy: unless-stopped
+    published_ports:
+      - "{{ host_port }}:{{ container_port }}"
+    env:
+      SERVER_ID: "{{ inventory_hostname }}"
+    labels:
+      io.sohyeon.owner: sohyeon
+      io.sohyeon.project: sohyeon-cicd
+      io.sohyeon.role: app
+      io.sohyeon.release: "{{ image_tag }}"
+    log_driver: json-file
+    log_options:
+      max-size: 10m
+      max-file: '3'
+  become: true
+  no_log: true

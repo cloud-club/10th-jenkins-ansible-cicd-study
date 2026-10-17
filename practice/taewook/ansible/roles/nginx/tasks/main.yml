@@ -1,0 +1,65 @@
+---
+- name: Check LB connectivity to every app server
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ app_port }}/version"
+    return_content: true
+    timeout: 5
+  loop: "{{ groups['app'] }}"
+  register: backend
+  failed_when: >-
+    backend.status != 200 or
+    (backend.json | default({})).get('release') != release_id or
+    (backend.json | default({})).get('instance') != item
+
+- name: Create personal staging directory outside conf.d
+  ansible.builtin.file:
+    path: "{{ app_stage }}"
+    state: directory
+    mode: '0750'
+
+- name: Render personal Nginx configuration
+  ansible.builtin.template:
+    src: taewook.conf.j2
+    dest: "{{ nginx_stage }}"
+    mode: '0644'
+
+- name: Apply configuration under shared lock
+  ansible.builtin.shell: |
+    set -eu
+    exec 9>"{{ nginx_lock }}"
+    flock -w 60 9
+    current="{{ nginx_conf }}"
+    staged="{{ nginx_stage }}"
+    backup="{{ app_stage }}/taewook.conf.bak"
+    if [ -f "$current" ] && cmp -s "$staged" "$current"; then
+      echo UNCHANGED
+      exit 0
+    fi
+    # Stop before changing anything if another configuration is already invalid.
+    nginx -t
+    had_previous=false
+    if [ -f "$current" ]; then
+      cp -p "$current" "$backup"
+      had_previous=true
+    fi
+    cp "$staged" "$current"
+    if ! nginx -t; then
+      if "$had_previous"; then cp -p "$backup" "$current"; else rm -f "$current"; fi
+      echo 'Validation failed; personal configuration restored.' >&2
+      exit 1
+    fi
+    if ! systemctl reload nginx; then
+      if "$had_previous"; then cp -p "$backup" "$current"; else rm -f "$current"; fi
+      nginx -t && systemctl reload nginx
+      echo 'Reload failed; personal configuration restored.' >&2
+      exit 1
+    fi
+    echo RELOADED
+  args:
+    executable: /bin/bash
+  register: apply
+  changed_when: "'RELOADED' in apply.stdout"
+
+- name: Show configuration result
+  ansible.builtin.debug:
+    var: apply.stdout_lines

@@ -1,0 +1,39 @@
+---
+# Jenkins post에서 실행한다. 라우팅·상태를 먼저 복원하고 관찰까지 통과해야 마커를 지운다.
+- name: Restore stable traffic
+  ansible.builtin.import_playbook: canary-route.yml
+  vars:
+    traffic_percent: 0
+    backend_snapshot_path: "{{ canary_report_dir }}/recovery-backends.json"
+
+- name: Restore the previous active-slot pointer
+  ansible.builtin.import_playbook: canary-commit.yml
+  vars:
+    restore_previous: true
+
+- name: Verify recovery through Nginx and clear the pending marker
+  hosts: load_balancer
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Verify old release and all three instances from the Agent
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/observe.py"
+          - stage
+          - --backends-file
+          - "{{ canary_report_dir }}/recovery-backends.json"
+          - --report
+          - "{{ canary_report_dir }}/recovery.jsonl"
+          - --percent
+          - '0'
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Clear recovery marker only after successful observation
+      ansible.builtin.file:
+        path: "{{ canary_report_dir }}/recovery-needed.json"
+        state: absent
+      delegate_to: localhost

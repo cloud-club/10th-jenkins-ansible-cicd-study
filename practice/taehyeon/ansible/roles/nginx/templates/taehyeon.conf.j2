@@ -1,0 +1,21 @@
+# Ansible이 관리하는 고태현 개인 설정
+# weight 비율로 기존·신규 슬롯에 트래픽을 분배한다.
+upstream taehyeon_backend {
+{% for target in nginx_targets %}
+    server {{ hostvars[target.host].ansible_host }}:{{ target.port }} weight={{ target.weight }};
+{% endfor %}
+}
+
+server {
+    listen {{ nginx_listen_port }};
+    server_name _;
+
+    location / {
+        proxy_pass http://taehyeon_backend;
+        # 다른 서버로 재시도해 신규 버전 오류가 숨겨지지 않도록 한다.
+        proxy_next_upstream off;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}

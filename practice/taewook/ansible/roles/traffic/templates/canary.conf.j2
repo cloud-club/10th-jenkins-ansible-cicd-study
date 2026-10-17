@@ -1,0 +1,23 @@
+# taewook 개인 서비스
+upstream taewook_backend {
+{% for host in groups['app'] %}
+{% if traffic_percent | int != 100 %}
+    server {{ hostvars[host].ansible_host }}:{{ stable_port }} weight={{ 9 if traffic_percent | int == 10 else 1 }};
+{% endif %}
+    server {{ hostvars[host].ansible_host }}:{{ candidate_port }} weight=1;
+{% endfor %}
+}
+server {
+    listen 18004;
+    server_name _;
+    location / {
+        proxy_pass http://taewook_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 5s;
+        # 재시도가 후보 서버 오류를 가리지 않도록 한다.
+        proxy_next_upstream off;
+        add_header X-Upstream-Addr $upstream_addr always;
+    }
+}

@@ -1,0 +1,7 @@
+---
+- name: Reload Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  delegate_to: "{{ lb_host }}"
+  become: true

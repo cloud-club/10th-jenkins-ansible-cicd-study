@@ -1,0 +1,73 @@
+---
+- name: Pull the exact release image
+  ansible.builtin.command:
+    argv: [docker, pull, "{{ image_ref }}"]
+  changed_when: false
+
+- name: Check whether our container exists
+  ansible.builtin.command:
+    argv: [docker, container, inspect, "{{ container_name }}"]
+  register: existing_container
+  failed_when: false
+  changed_when: false
+
+- name: Remove only Doyeon's old container
+  ansible.builtin.command:
+    argv: [docker, rm, -f, "{{ container_name }}"]
+  when: existing_container.rc == 0
+
+- name: Start the new release
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - -d
+      - --name
+      - "{{ container_name }}"
+      - --restart
+      - unless-stopped
+      - -p
+      - "{{ app_port }}:8080"
+      - -e
+      - "INSTANCE_ID={{ inventory_hostname }}"
+      - "{{ image_ref }}"
+
+- name: Wait for the direct health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/health"
+    return_content: true
+    status_code: 200
+  register: direct_health
+  retries: 12
+  delay: 5
+  until: direct_health.status == 200 and direct_health.json.status == 'ok'
+
+- name: Verify the exact version and responding server
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ app_port }}/version"
+    return_content: true
+    status_code: 200
+  register: direct_version
+  failed_when: >-
+    direct_version.status != 200 or
+    direct_version.json.version != app_version or
+    direct_version.json.release != release_id or
+    direct_version.json.instance != inventory_hostname
+
+- name: List images in this release repository
+  ansible.builtin.command:
+    argv:
+      - docker
+      - image
+      - ls
+      - "{{ image_ref.rsplit(':', 1)[0] }}"
+      - --format
+      - "{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}"
+  register: repo_images
+  changed_when: false
+
+- name: Remove older images of only Doyeon's repository
+  ansible.builtin.command:
+    argv: [docker, rmi, "{{ item }}"]
+  loop: "{{ repo_images.stdout_lines | reject('equalto', image_ref) | reject('search', ':<none>$') | list }}"
+  failed_when: false

@@ -1,0 +1,32 @@
+# Check every endpoint through one remote invocation.
+---
+- name: Verify server identity and release with all HTTP endpoints
+  ansible.builtin.command:
+    argv:
+      - python3
+      - '-'
+      - "{{ verification_options | to_json }}"
+    stdin: "{{ lookup('file', role_path ~ '/files/verify_application.py') }}"
+  vars:
+    verification_options:
+      url: "{{ check_url }}"
+      host: "{{ check_host }}"
+      app: "{{ app_name }}"
+      release: "{{ expected_release | default('') }}"
+      version: "{{ app_version | default('') }}"
+      bootstrap: "{{ bootstrap | bool }}"
+      timeout: "{{ request_timeout | float }}"
+  delegate_to: "{{ check_from }}"
+  throttle: 1
+  become: false
+  register: application_verification
+  changed_when: false
+  retries: "{{ health_retries }}"
+  delay: "{{ health_delay }}"
+  until: application_verification.rc == 0
+
+- name: Preserve verified responses for deployment preparation
+  ansible.builtin.set_fact:
+    service_response: "{{ (application_verification.stdout | from_json).service_response }}"
+    version_response: "{{ (application_verification.stdout | from_json).version_response }}"
+    legacy_response: "{{ (application_verification.stdout | from_json).legacy_response }}"

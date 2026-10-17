@@ -1,0 +1,18 @@
+---
+# 1주차 배포: App 서버 3대에 같은 이미지 배포 → nginx가 3대로 분산
+
+- name: Deploy minjun-app to app servers
+  hosts: app
+  become: true           # ubuntu 계정은 docker 그룹이 아님 → sudo 필요 (recon 확인)
+  gather_facts: false
+  roles:
+    - role: app
+      vars:
+        app_color: "{{ active_color }}"
+
+- name: Configure nginx (only /etc/nginx/conf.d/minjun.conf)
+  hosts: lb
+  become: true
+  gather_facts: false
+  roles:
+    - nginx

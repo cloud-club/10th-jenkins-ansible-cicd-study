@@ -1,0 +1,5 @@
+# 파일 역할: 앱 교체 Role에서 사용하는 이미지 태그와 tar 경로의 기본값을 정의한다.
+---
+# image_tag와 image_tar는 Jenkins가 빌드한 릴리스 값으로 전달한다.
+image_tag: ""
+image_tar: ""

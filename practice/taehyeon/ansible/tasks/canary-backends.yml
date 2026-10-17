@@ -1,0 +1,37 @@
+---
+# 가중치와 슬롯 선택은 Ansible이 담당한다. Python에는 완성된 관찰 대상만 전달한다.
+- name: Validate traffic stage and stable deployment
+  ansible.builtin.assert:
+    that:
+      - traffic_percent | string in ['0', '10', '50', '100']
+      - active_slot in ['a', 'b']
+      - groups['app_servers'] | sort == ['app1', 'app2', 'app3']
+      - metadata.version is string and metadata.version | length > 0
+      - metadata.gitSha is string and metadata.gitSha | length > 0
+      - metadata.release is string and metadata.release | length > 0
+
+- name: Validate candidate before increasing traffic
+  ansible.builtin.assert:
+    that:
+      - app_version is string and app_version | length > 0
+      - git_sha is string and git_sha | length > 0
+      - release_id is string and release_id | length > 0
+      - release_id != metadata.release
+  when: traffic_percent | int > 0
+
+- name: Select inactive slot and clear this stage's backend list
+  ansible.builtin.set_fact:
+    canary_candidate_slot: "{{ 'b' if active_slot == 'a' else 'a' }}"
+    canary_backends: []
+
+- name: Add stable backends unless traffic is fully promoted
+  ansible.builtin.set_fact:
+    canary_backends: "{{ canary_backends + [{'host':item, 'port':{'a':20001,'b':21001}[active_slot], 'weight':3 if traffic_percent | int == 10 else 1, 'metadata':metadata}] }}"
+  loop: "{{ groups['app_servers'] }}"
+  when: traffic_percent | int != 100
+
+- name: Add app1 for ten percent or all three candidates for later stages
+  ansible.builtin.set_fact:
+    canary_backends: "{{ canary_backends + [{'host':item, 'port':{'a':20001,'b':21001}[canary_candidate_slot], 'weight':1, 'metadata':{'version':app_version, 'gitSha':git_sha, 'release':release_id}}] }}"
+  loop: "{{ ['app1'] if traffic_percent | int == 10 else groups['app_servers'] }}"
+  when: traffic_percent | int > 0

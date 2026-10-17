@@ -1,0 +1,46 @@
+---
+- name: Verify release and traffic distribution through Nginx
+  hosts: lb
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Request version twelve times through Nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lb_port }}/version"
+        return_content: true
+        timeout: 5
+        headers:
+          Connection: close
+      loop: "{{ range(12) | list }}"
+      register: responses
+
+    - name: Verify every response belongs to this release
+      ansible.builtin.assert:
+        that:
+          - item.json.version == app_version
+          - item.json.git_sha == git_sha
+          - item.json.release == release_id
+      loop: "{{ responses.results }}"
+      loop_control:
+        label: "{{ item.json.instance }} / {{ item.json.release }}"
+
+    - name: Verify all three servers handled requests
+      ansible.builtin.assert:
+        that:
+          - responses.results | map(attribute='json.instance') | unique | sort == groups['app'] | sort
+        success_msg: "All 3 app servers served the tested release through Nginx."
+
+    - name: Check health through Nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lb_port }}/health"
+        return_content: true
+        timeout: 5
+      register: health
+      failed_when: health.status != 200 or (health.json | default({})).get('status') != 'ok'
+
+    - name: Save verification evidence in this Jenkins workspace
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/../build/verification.json"
+        content: "{{ responses.results | map(attribute='json') | list | to_nice_json }}"
+        mode: '0644'
+      delegate_to: localhost
