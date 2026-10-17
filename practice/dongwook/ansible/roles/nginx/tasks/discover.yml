@@ -1,4 +1,11 @@
 ---
+- name: Remove the previous run's deployment record
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../../.artifacts/deployment-result.json"
+    state: absent
+  delegate_to: localhost
+  become: false
+
 - name: Validate deployment topology and release metadata once
   ansible.builtin.assert:
     that:
@@ -63,3 +70,26 @@
 - name: Report the traffic switch planned for this release
   ansible.builtin.debug:
     msg: "{{ active_slot }}:{{ slot_ports[active_slot] }} -> {{ target_slot }}:{{ slot_ports[target_slot] }}"
+
+- name: Require a new release ID and a consistent previous release on all servers
+  ansible.builtin.assert:
+    that:
+      - previous_release.json.release != release_id
+
+- name: Verify the previous release on every backend before deployment
+  ansible.builtin.uri:
+    url: "http://{{ hostvars[item].ansible_host }}:{{ slot_ports[active_slot] }}/health"
+    use_proxy: false
+    timeout: 5
+    return_content: true
+  loop: "{{ groups['app_servers'] }}"
+  register: previous_health
+  failed_when: >-
+    previous_health.status | default(0) != 200 or
+    previous_health.json.status | default('') != 'ok' or
+    previous_health.json.service | default('') != container_name or
+    previous_health.json.release | default('') != previous_release.json.release or
+    previous_health.json.version | default('') != previous_release.json.version or
+    previous_health.json.revision | default('') != previous_release.json.revision or
+    previous_health.json.instance | default('') != item or
+    previous_health.json.slot | default('') != previous_release.json.slot

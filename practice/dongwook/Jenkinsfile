@@ -24,7 +24,7 @@ pipeline {
                             // Remove metadata left by an interrupted build before archiving anything.
                             sh '''
                                 mkdir -p .artifacts
-                                rm -f .artifacts/deploy-vars.json .artifacts/image-inspect.json
+                                rm -f .artifacts/deploy-vars.json .artifacts/image-inspect.json .artifacts/deployment-result.json
                                 rm -rf .artifacts/availability
                             '''
                         }
@@ -181,7 +181,7 @@ pipeline {
         always {
             dir(env.PROJECT_DIR) {
                 archiveArtifacts(
-                    artifacts: '.artifacts/deploy-vars.json,.artifacts/availability/*.json,.artifacts/availability/*.jsonl',
+                    artifacts: '.artifacts/deploy-vars.json,.artifacts/deployment-result.json,.artifacts/availability/*.json,.artifacts/availability/*.jsonl',
                     allowEmptyArchive: true
                 )
 
