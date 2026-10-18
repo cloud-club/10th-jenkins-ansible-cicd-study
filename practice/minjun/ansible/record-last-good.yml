@@ -39,4 +39,3 @@
       vars:
         audit_event: DEPLOY_DONE
       run_once: true
-      
