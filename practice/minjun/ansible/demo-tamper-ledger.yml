@@ -1,0 +1,50 @@
+---
+# 시연 전용 (Jenkins 파라미터 DEMO_TAMPER=ledger / restore-ledger 로만 실행)
+# LB 권한을 가진 공격자가 롤백 대상 기록을 오래된 버전으로 바꿔 두는 상황을 흉내 낸다.
+# 서명은 다시 계산하지 못한다(키가 서버에 없다) → ledger.py가 거부해야 한다.
+#
+#   -e ledger_demo=tamper   롤백 대상이 될 줄(직전 배포)의 tag를 tamper_to로 바꾼다. 원본은 .pre-tamper로 보관
+#   -e ledger_demo=restore  .pre-tamper로 되돌린다
+
+- name: Tamper with the deploy ledger on LB
+  hosts: lb
+  gather_facts: false
+  become: true
+  vars:
+    tamper_to: "v6-8b99f2a"     # 서버에 아직 남아 있는 예전 버전 — "롤백" 이름으로 되살리려는 것
+  tasks:
+    - name: Tamper
+      ansible.builtin.shell: |
+        set -eu
+        P="{{ ledger_remote }}"
+        cp -p "$P" "$P.pre-tamper"
+        python3 - "$P" "{{ tamper_to }}" <<'PY'
+        import json, sys
+        p, to = sys.argv[1], sys.argv[2]
+        L = [json.loads(x) for x in open(p) if x.strip()]
+        deps = [e for e in L if e["event"] in ("DEPLOY", "ROLLBACK")]
+        t = deps[-2]
+        old, t["tag"] = t["tag"], to
+        open(p, "w").write("".join(json.dumps(e, ensure_ascii=False, sort_keys=True) + "\n" for e in L))
+        print("TAMPERED ledger #%d: %s -> %s (signature left as is)" % (t["seq"], old, to))
+        PY
+      args:
+        executable: /bin/bash
+      register: tampered
+      when: ledger_demo == 'tamper'
+
+    - name: Restore
+      ansible.builtin.shell: |
+        set -eu
+        P="{{ ledger_remote }}"
+        test -f "$P.pre-tamper"
+        cp -p "$P.pre-tamper" "$P" && rm -f "$P.pre-tamper"
+        echo "RESTORED ledger from .pre-tamper"
+      args:
+        executable: /bin/bash
+      register: restored
+      when: ledger_demo == 'restore'
+
+    - name: Show
+      ansible.builtin.debug:
+        msg: "{{ (tampered.stdout | default('')) ~ (restored.stdout | default('')) }}"

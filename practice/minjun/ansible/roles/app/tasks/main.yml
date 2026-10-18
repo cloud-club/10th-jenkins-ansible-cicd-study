@@ -13,82 +13,135 @@
 # attestation(빌드 기록)을 붙여서 같은 커밋을 다시 빌드해도 최상위 ID가 바뀐다 → 재빌드가 전부 TAMPER(오탐).
 # (빌드 #10/#12: config는 f0335529로 같고 manifest list는 47f48b05/ea3901d2로 다름)
 # 그래서 기준을 "이번 빌드와 같은가"에서 "우리 파이프라인이 붙인 태그인가"로 바꿨다.
+#
+# 3주차: 로드 생략 모드 (app_skip_load)
+#   - 롤백: 서버에 남아 있는 이전 이미지를 쓴다. 아카이브가 없다(12시간 전 빌드 workspace는 이미 정리됨).
+#           대신 태그가 가리키는 ID가 "서명된 배포 기록"의 ID(app_expected_id)와 같아야 한다.
+#   - 교체 대상이 아닌 서버(update=False): 로드하지 않는다. 같은 태그를 재빌드하면 ID가 바뀌어
+#           docker가 drain 없이 컨테이너를 다시 만들던 2주차 한계를 없앤다. ID는 서버 기록과 비교만 한다.
 
-- name: Image ID under the deploy tag (before load)
-  community.docker.docker_image_info:
-    name: "{{ app_image }}:{{ image_tag }}"
-  register: img_before
+- name: Load CI artifact and judge the tag (normal deploy)
+  when: not (app_skip_load | bool)
+  block:
+    - name: Image ID under the deploy tag (before load)
+      community.docker.docker_image_info:
+        name: "{{ app_image }}:{{ image_tag }}"
+      register: img_before
 
-- name: Ensure my staging dir and ID record dir
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    mode: "0750"
-  loop:
-    - "{{ app_stage_dir }}"
-    - "{{ app_id_dir }}"
+    - name: Ensure my staging dir and ID record dir
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0750"
+      loop:
+        - "{{ app_stage_dir }}"
+        - "{{ app_id_dir }}"
 
-- name: Copy image archive (CI artifact)
-  ansible.builtin.copy:
-    src: "{{ image_archive }}"
-    dest: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
-    mode: "0640"
+    - name: Copy image archive (CI artifact)
+      ansible.builtin.copy:
+        src: "{{ image_archive }}"
+        dest: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+        mode: "0640"
 
-- name: Load image into docker
-  community.docker.docker_image_load:
-    path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+    - name: Load image into docker
+      community.docker.docker_image_load:
+        path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
 
-- name: Remove archive after load
-  ansible.builtin.file:
-    path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
-    state: absent
+    - name: Remove archive after load
+      ansible.builtin.file:
+        path: "{{ app_stage_dir }}/{{ app_image }}-{{ image_tag }}.tar.gz"
+        state: absent
 
-- name: Image ID under the deploy tag (after loading CI artifact)
-  community.docker.docker_image_info:
-    name: "{{ app_image }}:{{ image_tag }}"
-  register: img_after
+    - name: Image ID under the deploy tag (after loading CI artifact)
+      community.docker.docker_image_info:
+        name: "{{ app_image }}:{{ image_tag }}"
+      register: img_after
 
-- name: ID this pipeline recorded for the tag last time
-  ansible.builtin.slurp:
-    src: "{{ app_id_dir }}/{{ image_tag }}"
-  register: id_record
-  failed_when: false
+    - name: ID this pipeline recorded for the tag last time
+      ansible.builtin.slurp:
+        src: "{{ app_id_dir }}/{{ image_tag }}"
+      register: id_record
+      failed_when: false
 
-- name: Compare
-  ansible.builtin.set_fact:
-    id_before: "{{ img_before.images[0].Id if (img_before.images | length > 0) else '' }}"
-    id_after: "{{ img_after.images[0].Id }}"
-    id_recorded: "{{ (id_record.content | b64decode | trim) if (id_record.content is defined) else '' }}"
+    - name: Compare
+      ansible.builtin.set_fact:
+        id_before: "{{ img_before.images[0].Id if (img_before.images | length > 0) else '' }}"
+        id_after: "{{ img_after.images[0].Id }}"
+        id_recorded: "{{ (id_record.content | b64decode | trim) if (id_record.content is defined) else '' }}"
 
-# 로드했으니 지금 태그는 CI 산출물을 가리킨다 → 판정과 상관없이 기록을 갱신한다.
-# (변조가 감지된 실행에서도 기록해 둬야 다음 정상 배포가 이 ID를 "우리가 로드한 것"으로 인정한다)
-- name: Record the ID this pipeline just loaded
-  ansible.builtin.copy:
-    dest: "{{ app_id_dir }}/{{ image_tag }}"
-    content: "{{ id_after }}\n"
-    mode: "0640"
+    # 로드했으니 지금 태그는 CI 산출물을 가리킨다 → 판정과 상관없이 기록을 갱신한다.
+    # (변조가 감지된 실행에서도 기록해 둬야 다음 정상 배포가 이 ID를 "우리가 로드한 것"으로 인정한다)
+    - name: Record the ID this pipeline just loaded
+      ansible.builtin.copy:
+        dest: "{{ app_id_dir }}/{{ image_tag }}"
+        content: "{{ id_after }}\n"
+        mode: "0640"
 
-- name: Record tamper in audit log
-  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/audit.yml"
-  vars:
-    audit_event: TAMPER_DETECTED
-    audit_extra:
-      found: "{{ id_before }}"
-      recorded: "{{ id_recorded or 'none' }}"
-      ci_artifact: "{{ id_after }}"
-  when: id_before not in ['', id_recorded, id_after]
+    - name: Record tamper in audit log
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/audit.yml"
+      vars:
+        audit_event: TAMPER_DETECTED
+        audit_extra:
+          found: "{{ id_before }}"
+          recorded: "{{ id_recorded or 'none' }}"
+          ci_artifact: "{{ id_after }}"
+      when: id_before not in ['', id_recorded, id_after]
 
-- name: Integrity gate — tag must have been set by this pipeline
-  ansible.builtin.assert:
-    that: id_before in ['', id_recorded, id_after]
-    fail_msg: >-
-      TAMPER: {{ app_image }}:{{ image_tag }} on {{ inventory_hostname }} pointed to {{ id_before }},
-      which this pipeline never loaded (recorded={{ id_recorded or 'none' }}, CI artifact={{ id_after }}).
-      Not starting a container from it.
-    success_msg: >-
-      integrity ok ({{ 'first load' if id_before == ''
-                       else ('loaded by this pipeline before' if id_before == id_recorded
-                       else 'matches CI artifact') }})
+    - name: Integrity gate — tag must have been set by this pipeline
+      ansible.builtin.assert:
+        that: id_before in ['', id_recorded, id_after]
+        fail_msg: >-
+          TAMPER: {{ app_image }}:{{ image_tag }} on {{ inventory_hostname }} pointed to {{ id_before }},
+          which this pipeline never loaded (recorded={{ id_recorded or 'none' }}, CI artifact={{ id_after }}).
+          Not starting a container from it.
+        success_msg: >-
+          integrity ok ({{ 'first load' if id_before == ''
+                           else ('loaded by this pipeline before' if id_before == id_recorded
+                           else 'matches CI artifact') }})
+
+- name: Use the image already on this server (rollback / no update)
+  when: app_skip_load | bool
+  block:
+    - name: Image ID under the tag (no load)
+      community.docker.docker_image_info:
+        name: "{{ app_image }}:{{ image_tag }}"
+      register: img_kept
+
+    - name: ID this pipeline recorded for the tag
+      ansible.builtin.slurp:
+        src: "{{ app_id_dir }}/{{ image_tag }}"
+      register: kept_record
+      failed_when: false
+
+    - name: Compare (no load)
+      ansible.builtin.set_fact:
+        id_kept: "{{ img_kept.images[0].Id if (img_kept.images | length > 0) else '' }}"
+        id_recorded: "{{ (kept_record.content | b64decode | trim) if (kept_record.content is defined) else '' }}"
+        # 롤백이면 서명된 기록의 ID, 아니면 서버 기록
+        id_trusted: "{{ app_expected_id if (app_expected_id | default('') | length > 0) else ((kept_record.content | b64decode | trim) if (kept_record.content is defined) else '') }}"
+
+    - name: Record mismatch in audit log
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/audit.yml"
+      vars:
+        audit_event: "{{ 'ROLLBACK_TARGET_MISMATCH' if (app_expected_id | default('') | length > 0) else 'TAMPER_DETECTED' }}"
+        audit_extra:
+          found: "{{ id_kept or 'missing' }}"
+          trusted: "{{ id_trusted or 'none' }}"
+      when: id_kept == '' or id_trusted == '' or id_kept != id_trusted
+
+    - name: Integrity gate (no load) — image must match the trusted ID
+      ansible.builtin.assert:
+        that:
+          - id_kept != ''
+          - id_trusted != ''
+          - id_kept == id_trusted
+        fail_msg: >-
+          {{ app_image }}:{{ image_tag }} on {{ inventory_hostname }} is {{ id_kept or 'missing' }},
+          trusted ID is {{ id_trusted or 'none' }}
+          ({{ 'signed ledger' if (app_expected_id | default('') | length > 0) else 'server record' }}).
+          Not starting a container from it.
+        success_msg: >-
+          integrity ok (no load, matches {{ 'signed ledger' if (app_expected_id | default('') | length > 0) else 'server record' }})
 
 # 이미지 태그가 바뀌면 컨테이너를 다시 만들고, 같으면 그대로 둔다 (멱등).
 - name: Run {{ app_container }} on host port {{ app_port }}

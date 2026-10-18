@@ -7,3 +7,6 @@ app_container: "{{ owner }}-app-{{ app_color }}"
 app_stage_dir: "/opt/{{ owner }}/images"
 # 파이프라인이 로드한 이미지 ID 기록 (태그별 파일). 무결성 게이트의 기준값
 app_id_dir: "/opt/{{ owner }}/image-ids"
+# 3주차: 로드 생략 모드와, 그때 믿을 ID (롤백이면 서명된 기록에서 온다)
+app_skip_load: false
+app_expected_id: ""

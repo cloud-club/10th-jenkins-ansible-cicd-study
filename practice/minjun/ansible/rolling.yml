@@ -11,6 +11,9 @@
 #   rolling_drain: true  → 방식 A (drain 후 교체, 기본)
 #                  false → 방식 C (drain 없이 교체, Nginx 재시도에 맡김 — 비교 실험용)
 #   drain_wait:    drain 후 진행 중 요청이 끝나길 기다리는 초
+#   rollback_mode: true면 3주차 롤백 — 아카이브를 로드하지 않고 서버에 남은 이전 이미지를 쓴다.
+#                  expected_ids(서명된 배포 기록의 서버별 이미지 ID)와 일치해야 하고,
+#                  교체 전에 불량 컨테이너의 증거(inspect, 로그)를 수집한다.
 
 # ---------------------------------------------------------------------------
 # [0] 사전 확인
@@ -73,6 +76,7 @@
       vars:
         audit_event: DEPLOY_START
         audit_extra:
+          action: "{{ 'rollback' if (rollback_mode | default(false) | bool) else 'deploy' }}"
           drain: "{{ rolling_drain | default(true) | bool }}"
           already_down: "{{ already_down }}"
           unhealthy: "{{ unhealthy }}"
@@ -90,6 +94,9 @@
   vars:
     rolling_drain: true
     drain_wait: 3
+    rollback_mode: false
+    expected_ids: {}
+    evidence_dir: "/opt/{{ owner }}/evidence/{{ build_id | default('manual') }}"
     app_container: "{{ owner }}-app-{{ active_color }}"
     target_image: "{{ app_image }}:{{ image_tag }}"
     lb_host: "{{ groups['lb'][0] }}"
@@ -155,12 +162,51 @@
         audit_event: SERVER_DRAINED
       when: needs_update and (rolling_drain | bool)
 
+    # --- 3주차: 증거 보존 (롤백일 때, 불량 컨테이너를 지우기 전에) -----------------
+    # 12시간 뒤에 발견된 장애라면 원인 분석은 나중이다. 교체하는 순간 컨테이너와 로그는 사라진다.
+    # 지금 컨테이너 설정·로그·이미지 정보를 남기고 해시를 붙여 Jenkins Archive로 가져간다.
+    - name: Collect evidence from the container being rolled back
+      ansible.builtin.shell: |
+        set -eu
+        D="{{ evidence_dir }}/{{ inventory_hostname }}"
+        mkdir -p "$D" && chmod 750 "$D"
+        docker inspect {{ app_container }} > "$D/container-inspect.json"
+        docker image inspect {{ current_image }} > "$D/image-inspect.json"
+        docker logs --timestamps --tail 300 {{ app_container }} > "$D/container.log" 2>&1
+        cd "$D" && sha256sum container-inspect.json image-inspect.json container.log > SHA256SUMS
+        echo "EVIDENCE $D $(wc -l < container.log) log lines"
+      args:
+        executable: /bin/bash
+      register: evidence
+      changed_when: true
+      when: (rollback_mode | bool) and needs_update and cur.exists
+
+    - name: Bring evidence to the agent
+      ansible.builtin.fetch:
+        src: "{{ evidence_dir }}/{{ inventory_hostname }}/{{ item }}"
+        dest: "{{ evidence_local }}/{{ inventory_hostname }}/{{ item }}"
+        flat: true
+      loop: [container-inspect.json, image-inspect.json, container.log, SHA256SUMS]
+      when: (rollback_mode | bool) and needs_update and cur.exists
+
+    - name: Audit EVIDENCE_COLLECTED
+      ansible.builtin.include_tasks: tasks/audit.yml
+      vars:
+        audit_event: EVIDENCE_COLLECTED
+        audit_extra:
+          container_image: "{{ current_image }}"
+          path: "{{ evidence_dir }}/{{ inventory_hostname }}"
+      when: (rollback_mode | bool) and needs_update and cur.exists
+
   # --- 교체 + 서버 직접 헬스체크 (1주차 Role 그대로) ---------------------------
   # 이미지 로드 → 컨테이너 교체 → 127.0.0.1:20006 /health 200 → /version == 새 버전
   roles:
     - role: app
       vars:
         app_color: "{{ active_color }}"
+        # 롤백이거나 교체 대상이 아니면 로드하지 않는다 (3주차)
+        app_skip_load: "{{ (rollback_mode | bool) or not (needs_update | bool) }}"
+        app_expected_id: "{{ (expected_ids[inventory_hostname] | default('')) if (rollback_mode | bool) else '' }}"
 
   post_tasks:
     # --- undrain -------------------------------------------------------------

@@ -22,3 +22,6 @@ drained_hosts: []
 
 # 2주차 보안 변형 B: 배포 감사 로그 (LB에 JSON Lines로 한 줄씩 기록)
 audit_log: "/var/log/{{ owner }}-deploy.jsonl"
+
+# 3주차: 서명된 배포 기록. LB 원본 + Jenkins Archive 사본
+ledger_remote: "/var/lib/{{ owner }}/ledger.jsonl"
