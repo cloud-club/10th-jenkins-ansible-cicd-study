@@ -16,7 +16,7 @@ pipeline {
 
     environment {
         PROJECT_DIR = 'practice/dongwook'
-        DEPLOY_JOB_NAME = 'dongwook/deploy-pipeline'
+        DEPLOY_JOB_NAME = 'dongwook/blue-green-deploy-pipeline(week7)'
     }
 
     stages {

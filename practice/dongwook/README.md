@@ -33,7 +33,7 @@ FastAPI 앱을 Jenkins에서 빌드·테스트하고 Docker Hub에 게시한 뒤
 
 | 항목 | 값 |
 | --- | --- |
-| Jenkins Folder / Pipeline Job | `dongwook/deploy-pipeline` |
+| Jenkins Folder / Pipeline Job | `dongwook/blue-green-deploy-pipeline(week7)` |
 | Agent label | `ansible-agent` |
 | Nginx 서비스 포트 | `18003` |
 | Blue / Green 호스트 포트 | `20003` / `21003` |

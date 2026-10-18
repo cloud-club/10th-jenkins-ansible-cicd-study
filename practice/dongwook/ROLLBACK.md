@@ -17,7 +17,7 @@
 ## Jenkins 설정
 
 - **Copy Artifact**, **Lockable Resources** 플러그인을 설치한다.
-- 기존 `dongwook/deploy-pipeline`은 Script Path `practice/dongwook/Jenkinsfile`을 사용한다.
+- 기존 `dongwook/blue-green-deploy-pipeline(week7)`은 Script Path `practice/dongwook/Jenkinsfile`을 사용한다. 롤백 Job의 `DEPLOY_JOB_NAME`은 실제 배포 Job의 전체 경로와 일치해야 한다. 배포 기록의 `source.job`은 생성 당시 이름이므로, 같은 Job의 이름을 변경한 경우 이전 이름이 남아 있어도 사용할 수 있다. Artifact는 현재 지정한 Job에서 가져오고 빌드 번호·서버 구성·릴리스 정보를 검증한다.
 - 같은 Folder에 `rollback-pipeline`을 만들고, 같은 저장소·브랜치에 Script Path `practice/dongwook/Jenkinsfile.rollback`을 지정한다. 두 Job 모두 `ansible-agent`에서 실행한다.
 - 배포 Job의 `copyArtifactPermission('/dongwook/rollback-pipeline')`이 해당 롤백 Job의 Artifact 조회를 허용한다. Job 경로를 바꾸면 이 값과 롤백 Job의 `DEPLOY_JOB_NAME`도 수정한다.
 - 두 Job은 `dongwook-production` 잠금을 공유한다. 배포의 슬롯 확인·교체·전환과 롤백은 동시에 진행하지 않는다. 직접 Ansible을 실행할 때는 이 잠금이 적용되지 않으므로 두 Job의 실행과 트리거를 먼저 막는다.
@@ -28,7 +28,7 @@
 
 예를 들어 배포 **#42가 blue A → green B**로 성공했는데 B에서 기능 장애가 발생했다면:
 
-1. `deploy-pipeline`의 **#42** Artifact에서 `deployment-result.json`을 확인한다. `before`가 blue A, `after`가 green B여야 한다.
+1. `blue-green-deploy-pipeline(week7)`의 **#42** Artifact에서 `deployment-result.json`을 확인한다. `before`가 blue A, `after`가 green B여야 한다.
 2. `rollback-pipeline`의 **Build with Parameters**에서 `DEPLOY_BUILD_NUMBER=42`와 `REASON`에 장애 증상을 입력한다. A를 배포했던 빌드 번호를 입력하는 것이 아니다.
 3. Job 성공과 Console Output의 검증 결과를 확인하고, 실제 문제가 발생한 기능을 직접 재확인한다. 사용한 JSON은 롤백 빌드에도 보관되고, 사유와 결과는 Jenkins 파라미터·로그에 남는다.
 

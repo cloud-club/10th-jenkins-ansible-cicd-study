@@ -18,7 +18,8 @@
           - container_name == 'dongwook-app'
           - slot_ports == {'blue':20003, 'green':21003}
           - deployment.status == 'completed'
-          - deployment.source.job == lookup('ansible.builtin.env', 'DEPLOY_JOB_NAME')
+          # Copy Artifact selects the source Job; source.job keeps its name at
+          # deployment time and may differ after the same Jenkins Job is renamed.
           - deployment.source.build | string == lookup('ansible.builtin.env', 'DEPLOY_BUILD_NUMBER')
           - deployment.before.slot in slot_ports
           - deployment.after.slot in slot_ports
