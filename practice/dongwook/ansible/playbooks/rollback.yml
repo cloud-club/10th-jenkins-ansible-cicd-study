@@ -1,0 +1,146 @@
+---
+- name: Restore the previous slot recorded by a completed deployment
+  hosts: load_balancers
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    deployment: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../../.artifacts/source/deployment-result.json') | from_json }}"
+    target_slot: "{{ deployment.before.slot }}"
+  tasks:
+    - name: Validate the selected build and inventory before changing traffic
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+          - groups['load_balancers'] | length == 1
+          - groups['app_servers'] | length == 3
+          - member == 'dongwook'
+          - container_name == 'dongwook-app'
+          - slot_ports == {'blue':20003, 'green':21003}
+          - deployment.status == 'completed'
+          - deployment.source.job == lookup('ansible.builtin.env', 'DEPLOY_JOB_NAME')
+          - deployment.source.build | string == lookup('ansible.builtin.env', 'DEPLOY_BUILD_NUMBER')
+          - deployment.before.slot in slot_ports
+          - deployment.after.slot in slot_ports
+          - deployment.before.slot != deployment.after.slot
+          - deployment.before.release_id != deployment.after.release_id
+          - deployment.before.response_slot == target_slot or (target_slot == 'blue' and deployment.before.response_slot == 'primary')
+          - deployment.topology.load_balancer == ansible_host
+          - deployment.topology.nginx_port | int == nginx_port | int
+          - deployment.topology.app_servers == dict(groups['app_servers'] | zip(groups['app_servers'] | map('extract', hostvars, 'ansible_host')))
+        fail_msg: Select the completed deployment build for this environment.
+
+    - name: Read the configuration to restore if rollback fails
+      ansible.builtin.slurp:
+        src: "{{ nginx_config_path }}"
+      register: original_config
+
+    - name: Determine the currently routed slot using the existing discovery script
+      ansible.builtin.command:
+        argv: "{{ ['python3', playbook_dir ~ '/../../scripts/deployment_state.py', '--upstream', nginx_upstream, '--hosts'] + (groups['app_servers'] | map('extract', hostvars, 'ansible_host') | list) }}"
+        stdin: "{{ original_config.content | b64decode }}"
+      delegate_to: localhost
+      become: false
+      register: discovered_slots
+      changed_when: false
+
+    # Inspect release metadata only. The current application may be unhealthy or
+    # stopped, and recreating a container with the same release is acceptable.
+    - name: Check the current release before undoing the selected deployment
+      when: (discovered_slots.stdout | from_json).active_slot == deployment.after.slot
+      block:
+        - name: Read the deployed release metadata from each current container
+          ansible.builtin.command:
+            argv: [docker, container, inspect, --format, "{{ '{{json .Config.Env}}' }}", "{{ container_name }}-{{ deployment.after.slot }}"]
+          delegate_to: "{{ item }}"
+          loop: "{{ groups['app_servers'] }}"
+          register: current_containers
+          changed_when: false
+          no_log: true
+
+        - name: Reject a build that no longer matches the current release
+          ansible.builtin.assert:
+            that:
+              - "('RELEASE_ID=' ~ deployment.after.release_id) in (item.stdout | from_json)"
+              - "('APP_VERSION=' ~ deployment.after.app_version) in (item.stdout | from_json)"
+              - "('GIT_REVISION=' ~ deployment.after.git_revision) in (item.stdout | from_json)"
+              - "('DEPLOYMENT_SLOT=' ~ deployment.after.slot) in (item.stdout | from_json)"
+            fail_msg: The selected build is no longer the current deployment.
+          loop: "{{ current_containers.results }}"
+          no_log: true
+
+    - name: Require the recorded previous release to be healthy on all three servers
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host }}:{{ slot_ports[target_slot] }}/health"
+        use_proxy: false
+        timeout: 5
+        return_content: true
+      loop: "{{ groups['app_servers'] }}"
+      register: previous_health
+      until: >-
+        previous_health.status | default(0) == 200 and
+        previous_health.json.status | default('') == 'ok' and
+        previous_health.json.service | default('') == container_name and
+        previous_health.json.release | default('') == deployment.before.release_id and
+        previous_health.json.version | default('') == deployment.before.app_version and
+        previous_health.json.revision | default('') == deployment.before.git_revision and
+        previous_health.json.slot | default('') == deployment.before.response_slot and
+        previous_health.json.instance | default('') == item
+      retries: 5
+      delay: 2
+
+    # This guard is outside rescue: a failed precondition must not overwrite
+    # another operation's configuration with our earlier copy.
+    - name: Read the configuration again immediately before switching
+      ansible.builtin.slurp:
+        src: "{{ nginx_config_path }}"
+      register: latest_config
+
+    - name: Reject a concurrent configuration change
+      ansible.builtin.assert:
+        that:
+          - latest_config.content == original_config.content
+
+    - name: Route traffic to the recorded previous slot and verify it
+      block:
+        - name: Render the existing template for the previous slot
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/nginx/templates/dongwook.conf.j2"
+            dest: "{{ nginx_config_path }}"
+            mode: '0644'
+
+        - name: Validate Nginx before reloading
+          ansible.builtin.command: nginx -t
+          changed_when: false
+
+        - name: Reload Nginx onto the previous slot
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+
+        - name: Verify the previous release and all instances through Nginx
+          ansible.builtin.command:
+            argv: "{{ ['python3', playbook_dir ~ '/../../scripts/verify.py', '--base-url', 'http://' ~ ansible_host ~ ':' ~ (nginx_port | string), '--version', deployment.before.app_version, '--release', deployment.before.release_id, '--revision', deployment.before.git_revision, '--slot', deployment.before.response_slot, '--instances'] + groups['app_servers'] }}"
+          delegate_to: localhost
+          become: false
+          changed_when: false
+
+      rescue:
+        - name: Restore the configuration from the beginning of this rollback
+          ansible.builtin.copy:
+            content: "{{ original_config.content | b64decode }}"
+            dest: "{{ nginx_config_path }}"
+            mode: '0644'
+
+        - name: Validate the restored configuration
+          ansible.builtin.command: nginx -t
+          changed_when: false
+
+        - name: Reload the original configuration
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+
+        - name: Report failure even if the original configuration was restored
+          ansible.builtin.fail:
+            msg: "Rollback failed at {{ ansible_failed_task.name }}. Original routing restored; check service health before retrying."

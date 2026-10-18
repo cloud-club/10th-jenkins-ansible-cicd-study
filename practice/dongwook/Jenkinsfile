@@ -7,6 +7,7 @@ pipeline {
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '10'))
+        copyArtifactPermission('/dongwook/rollback-pipeline')
     }
 
     environment {
@@ -62,6 +63,8 @@ pipeline {
                                 export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
                                 ansible-playbook -i ansible/inventory/hosts.yml \
                                     ansible/playbooks/deploy.yml --syntax-check
+                                ansible-playbook -i ansible/inventory/hosts.yml \
+                                    ansible/playbooks/rollback.yml --syntax-check
                             '''
                         }
                     }
@@ -146,29 +149,43 @@ pipeline {
 
                 stage('Deploy Blue Green') {
                     steps {
-                        withCredentials([
-                            usernamePassword(
-                                credentialsId: 'dockerhub-credentials',
-                                usernameVariable: 'DOCKERHUB_USERNAME',
-                                passwordVariable: 'DOCKERHUB_TOKEN'
-                            )
-                        ]) {
-                            dir(env.PROJECT_DIR) {
-                                sh '''
-                                    set -eu
-                                    export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
-                                    # Agent 실행 계정의 SSH 키, SSH 설정, known_hosts를 사용한다.
-                                    ansible-inventory -i ansible/inventory/hosts.yml --graph
-                                    ansible-playbook -i ansible/inventory/hosts.yml \
-                                        ansible/playbooks/deploy.yml --list-hosts
-                                    # Sample HTTP continuously before, during and after the deployment.
-                                    python3 scripts/monitor_deployment.py \
-                                        --expected-file .artifacts/deploy-vars.json \
-                                        --output-dir .artifacts/availability \
-                                        -- ansible-playbook -i ansible/inventory/hosts.yml \
-                                            ansible/playbooks/deploy.yml \
-                                            --extra-vars @.artifacts/deploy-vars.json
-                                '''
+                        lock(resource: 'dongwook-production') {
+                            script {
+                                try {
+                                    withCredentials([
+                                        usernamePassword(
+                                            credentialsId: 'dockerhub-credentials',
+                                            usernameVariable: 'DOCKERHUB_USERNAME',
+                                            passwordVariable: 'DOCKERHUB_TOKEN'
+                                        )
+                                    ]) {
+                                        dir(env.PROJECT_DIR) {
+                                            sh '''
+                                                set -eu
+                                                export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
+                                                # Agent 실행 계정의 SSH 키, SSH 설정, known_hosts를 사용한다.
+                                                ansible-inventory -i ansible/inventory/hosts.yml --graph
+                                                ansible-playbook -i ansible/inventory/hosts.yml \
+                                                    ansible/playbooks/deploy.yml --list-hosts
+                                                # Sample HTTP continuously before, during and after the deployment.
+                                                python3 scripts/monitor_deployment.py \
+                                                    --expected-file .artifacts/deploy-vars.json \
+                                                    --output-dir .artifacts/availability \
+                                                    -- ansible-playbook -i ansible/inventory/hosts.yml \
+                                                        ansible/playbooks/deploy.yml \
+                                                        --extra-vars @.artifacts/deploy-vars.json
+                                            '''
+                                        }
+                                    }
+                                } finally {
+                                    dir(env.PROJECT_DIR) {
+                                        // Keep completed deployment evidence even if monitoring failed.
+                                        if (fileExists('.artifacts/deployment-result.json')) {
+                                            currentBuild.keepLog = true
+                                            archiveArtifacts artifacts: '.artifacts/deployment-result.json', fingerprint: true
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

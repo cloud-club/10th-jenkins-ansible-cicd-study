@@ -1,0 +1,78 @@
+pipeline {
+    agent { label 'ansible-agent' }
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    parameters {
+        string(name: 'DEPLOY_BUILD_NUMBER', defaultValue: '', description: '되돌릴 배포 빌드 번호. 해당 배포 직전 슬롯으로 복구합니다.', trim: true)
+        text(name: 'REASON', defaultValue: '', description: '기능 장애 증상과 롤백 사유 (필수, 1000자 이내)')
+    }
+
+    environment {
+        PROJECT_DIR = 'practice/dongwook'
+        DEPLOY_JOB_NAME = 'dongwook/deploy-pipeline'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    sh 'rm -rf .artifacts/source'
+                }
+                script {
+                    if (!(params.DEPLOY_BUILD_NUMBER ==~ /[1-9][0-9]*/)) {
+                        error('DEPLOY_BUILD_NUMBER에는 배포 빌드 번호를 입력하세요.')
+                    }
+                    if (!params.REASON.trim() || params.REASON.length() > 1000) {
+                        error('롤백 사유를 1~1000자로 입력하세요.')
+                    }
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} rollback deploy #${params.DEPLOY_BUILD_NUMBER}"
+                }
+                checkout scm
+            }
+        }
+
+        stage('Load Deployment Artifact') {
+            steps {
+                dir(env.PROJECT_DIR) {
+                    copyArtifacts(
+                        projectName: "/${env.DEPLOY_JOB_NAME}",
+                        selector: specific(params.DEPLOY_BUILD_NUMBER),
+                        filter: '.artifacts/deployment-result.json',
+                        target: '.artifacts/source',
+                        flatten: true,
+                        fingerprintArtifacts: true
+                    )
+                }
+            }
+        }
+
+        stage('Rollback Previous Slot') {
+            steps {
+                lock(resource: 'dongwook-production') {
+                    dir(env.PROJECT_DIR) {
+                        sh '''
+                            set -eu
+                            export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
+                            ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/rollback.yml
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            dir(env.PROJECT_DIR) {
+                archiveArtifacts artifacts: '.artifacts/source/deployment-result.json', allowEmptyArchive: true
+            }
+        }
+    }
+}
