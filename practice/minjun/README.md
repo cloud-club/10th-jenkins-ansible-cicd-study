@@ -19,7 +19,7 @@
 
 ## 파이프라인
 
-`Checkout → Build → Test → Package → (Demo: Plant Tampered Image) → Rolling Deploy → Verify`
+`Checkout → Build → Test → Package → (Demo: Plant Tampered Image) → Rolling Deploy → Verify → Record Last Good Tag`
 
 | 파라미터 (choice만) | 값 | 의미 |
 |---|---|---|
@@ -49,7 +49,15 @@
 
     실패하면 그 서버는 down인 채로 멈추고 다음 서버로 안 넘어감. 나머지는 이전 버전으로 서비스 유지
 
-[4] 전부 성공했을 때만 /opt/minjun/last_good_tag 갱신 (이전 값 → prev_good_tag) — 3주차 롤백용
+[4] Rolling Deploy 완료
+    각 서버의 배포 및 개별 검증 완료
+
+[5] Jenkins Verify
+    Nginx 경유 전체 버전 및 서버 응답 검증
+
+[6] Record Last Good Tag
+    최종 Verify 성공 시에만 last_good_tag 갱신
+    이전 정상 태그는 prev_good_tag에 보관
 ```
 
 같은 이미지 태그로 다시 실행하면 drain·reload를 하지 않는다.
@@ -171,6 +179,7 @@ ansible/tasks/audit.yml           감사 로그 한 줄 기록
 ansible/roles/app/tasks/main.yml  CI 이미지 로드 + 무결성 게이트 + 컨테이너 교체
 ansible/roles/nginx/tasks/render.yml    staging 렌더링 + 실제 conf 비교 → notify
 ansible/roles/nginx/handlers/main.yml   락 안에서 적용·검사·reload (delegate_to LB)
+ansible/record-last-good.yml            Jenkins 최종 Verify 성공 이후 정상 배포 태그 기록
 tools/measure.py, tools/analyze.py      무중단 측정 / 타임라인 분석 (표준 라이브러리만)
 results/*.csv                     A-drain, C-nodrain, tamper 측정 원본
 ```

@@ -1,0 +1,41 @@
+---
+# Jenkins 최종 Verify 성공 이후에만 실행한다.
+# 마지막 정상 배포 태그를 기록한다.
+
+- name: Record last good tag
+  hosts: app
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Update last_good_tag
+      ansible.builtin.shell: |
+        set -eu
+        D="/opt/{{ owner }}"
+        TAG="{{ image_tag }}"
+
+        mkdir -p "$D"
+
+        CUR="$(cat "$D/last_good_tag" 2>/dev/null || true)"
+
+        if [ "$CUR" = "$TAG" ]; then
+          echo "UNCHANGED"
+          exit 0
+        fi
+
+        if [ -n "$CUR" ]; then
+          echo "$CUR" > "$D/prev_good_tag"
+        fi
+
+        echo "$TAG" > "$D/last_good_tag"
+        echo "UPDATED prev=${CUR:-none} last=$TAG"
+      args:
+        executable: /bin/bash
+      register: tag_rec
+      changed_when: "'UPDATED' in tag_rec.stdout"
+
+    - name: Audit DEPLOY_DONE
+      ansible.builtin.include_tasks: tasks/audit.yml
+      vars:
+        audit_event: DEPLOY_DONE
+      run_once: true

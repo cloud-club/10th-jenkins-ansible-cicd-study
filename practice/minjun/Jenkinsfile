@@ -156,6 +156,23 @@ pipeline {
         }
       }
     }
+    stage('Record Last Good Tag') {
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: env.SSH_CRED,
+                                           keyFileVariable: 'SSH_KEY',
+                                           usernameVariable: 'SSH_USER')]) {
+          dir('ansible') {
+            sh '''
+              ansible-playbook -i inventory.ini record-last-good.yml \
+                -u "$SSH_USER" --private-key "$SSH_KEY" \
+                -e app_version="$APP_VERSION" \
+                -e git_sha="$GIT_SHA" \
+                -e build_id="$BUILD_NUMBER"
+            '''
+          }
+        }
+      }
+    }
   }
 
   post {

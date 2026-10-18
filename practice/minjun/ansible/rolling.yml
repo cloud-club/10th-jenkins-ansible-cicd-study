@@ -210,30 +210,5 @@
       when: needs_update
 
 # ---------------------------------------------------------------------------
-# [4] 전부 성공했을 때만 도달한다 → 3주차 롤백용 "마지막 정상 태그" 기록
-#     이전 값은 prev_good_tag로 밀어 둔다. 이미지는 서버에서 지우지 않는다.
-- name: Record last good tag
-  hosts: app
-  become: true
-  gather_facts: false
-  tasks:
-    - name: last_good_tag ← {{ image_tag }}
-      ansible.builtin.shell: |
-        set -eu
-        D="/opt/{{ owner }}"; TAG="{{ image_tag }}"
-        mkdir -p "$D"
-        CUR="$(cat "$D/last_good_tag" 2>/dev/null || true)"
-        if [ "$CUR" = "$TAG" ]; then echo "UNCHANGED"; exit 0; fi
-        [ -n "$CUR" ] && echo "$CUR" > "$D/prev_good_tag"
-        echo "$TAG" > "$D/last_good_tag"
-        echo "UPDATED prev=${CUR:-none} last=$TAG"
-      args:
-        executable: /bin/bash
-      register: tag_rec
-      changed_when: "'UPDATED' in tag_rec.stdout"
-
-    - name: Audit DEPLOY_DONE
-      ansible.builtin.include_tasks: tasks/audit.yml
-      vars:
-        audit_event: DEPLOY_DONE
-      run_once: true
+# Rolling Deploy 완료
+# 마지막 정상 배포 태그는 Jenkins 최종 Verify 성공 이후 별도로 기록한다.
