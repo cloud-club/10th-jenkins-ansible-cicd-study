@@ -1,13 +1,14 @@
 # 김동욱 Jenkins / Ansible CI/CD 실습
 
-FastAPI 앱을 Jenkins에서 빌드·테스트하고 Docker Hub에 게시한 뒤, Ansible로 App 서버 3대와 Nginx를 관리하는 실습이다. 이 문서에 1주차 기본 구성과 2주차 블루그린 배포·검증 내용을 함께 정리한다.
+FastAPI 앱을 Jenkins에서 빌드·테스트하고 Docker Hub에 게시한 뒤, Ansible로 App 서버 3대와 Nginx를 관리하는 실습이다. 기본 배포와 블루그린 배포·검증을 정리하고, 배포 완료 후 롤백 절차는 [별도 안내](ROLLBACK.md)로 연결한다.
 
 | 구분 | 학습 내용 | 코드 기준 |
 | --- | --- | --- |
 | 1주차 | Jenkins CI/CD, 이미지 digest 배포, 서버별 컨테이너 순차 교체 | `df7c9f9` 커밋의 기본 구성 |
-| 2주차 | Blue-Green, Nginx 트래픽 전환, 실패 복구, 지속 HTTP 관측 | 현재 작업 코드 |
+| 2주차 | Blue-Green, Nginx 트래픽 전환, 실패 복구, 지속 HTTP 관측 | 블루그린 배포 구성 |
+| 3주차 | 배포 기록을 읽어 기능 장애 발생 후 이전 슬롯으로 롤백 | [롤백 설정과 실행](ROLLBACK.md) |
 
-현재 실행 방법은 **2주차 구성 기준**이다. 아래의 1주차 설명은 이전 구성 기록이며, 수동 버전 입력과 단일 포트 교체 방식은 현재 Pipeline에 적용되지 않는다. 별도 안내가 없는 명령의 실행 위치는 `practice/dongwook/`이다.
+현재 실행 방법은 **블루그린 배포와 롤백 구성 기준**이다. 아래의 1주차 설명은 이전 구성 기록이며, 수동 버전 입력과 단일 포트 교체 방식은 현재 Pipeline에 적용되지 않는다. 별도 안내가 없는 명령의 실행 위치는 `practice/dongwook/`이다.
 
 - [공통 환경](#공통-환경)
 - [디렉터리](#디렉터리)
@@ -80,6 +81,8 @@ FastAPI 앱을 Jenkins에서 빌드·테스트하고 Docker Hub에 게시한 뒤
 practice/dongwook/
 ├── README.md                          # 1·2주차 구성과 검증 기록
 ├── Jenkinsfile                        # CI, 운영 승인 배포, 지속 HTTP 관측
+├── Jenkinsfile.rollback               # 배포 기록을 이용한 이전 슬롯 복구
+├── ROLLBACK.md                        # 롤백 설정과 운영 절차
 ├── .gitignore                         # 키, 환경변수, 임시 산출물 제외
 ├── app/
 │   ├── Dockerfile
@@ -92,6 +95,7 @@ practice/dongwook/
 │   │   ├── hosts.yml                  # App 3대 + Nginx
 │   │   └── group_vars/all.yml         # 개인 리소스, 슬롯과 포트
 │   ├── playbooks/deploy.yml           # 슬롯 발견 → 후보 배포 → 전환
+│   ├── playbooks/rollback.yml         # 기록 조회 → 이전 릴리스 확인 → 전환
 │   └── roles/
 │       ├── app/tasks/main.yml         # 비활성 슬롯 배포, legacy 전환
 │       └── nginx/
@@ -172,20 +176,22 @@ flowchart LR
 
 1. 기존 **Pipeline** Job에서 Definition을 `Pipeline script from SCM`으로 설정하고 저장소와 SCM Credential을 지정한다. Script Path는 `practice/dongwook/Jenkinsfile`이다.
 2. Job의 **Branches to build / Branch Specifier**에 실제 배포할 브랜치를 지정한다. `checkout scm`은 이 설정의 커밋을 빌드한다. Jenkinsfile은 브랜치 이름을 판별하지 않으므로, Job이 다른 브랜치를 체크아웃하면 그 코드도 CI 통과와 운영 승인 후 배포 대상이 된다.
-3. Pipeline, Git, Credentials Binding 플러그인을 준비한다.
+3. Pipeline, Git, Credentials Binding과 Copy Artifact, Lockable Resources 플러그인을 준비한다. 롤백 Job과 공유 잠금 설정은 [롤백 운영 안내](ROLLBACK.md#jenkins-설정)를 따른다.
 4. `dockerhub-credentials`에 Docker Hub ID와 토큰을 등록한다. Agent에는 Python 3, Docker CLI/엔진, Ansible이 필요하다. Agent 계정의 SSH 키·설정·`known_hosts`로 App 서버와 Nginx에 접속하고, 원격 배포 계정은 비밀번호 없이 sudo가 가능해야 한다.
 5. 운영 승인 권한은 Jenkins Folder/Job 권한으로 제한한다. 이 Job은 신뢰할 수 있는 배포 브랜치와 Agent를 전제로 한다. 외부 PR 코드를 실행하는 CI는 운영 SSH 키가 없는 별도 Job/Agent에서 수행한다.
 
 ### 배포 순서와 기존 서비스 전환
 
 1. 배포 시작 시 인벤토리·릴리스 정보·이미지 digest·Registry 인증 변수를 한 번 검사한다. 이후 Nginx의 기존 설정을 읽어 `dongwook_backend`의 세 IP가 모두 같은 `20003` 또는 `21003`을 사용하는지 확인한다. 설정이 없거나 혼합 포트·다른 서버가 있으면 배포를 중단한다. 이 Playbook은 현재 서비스의 전환용이며 초기 서버 설치용이 아니다.
-2. Nginx에서 `/health`를 한 번 호출해 현재 서비스 상태와 이전 release를 확인하고, 응답의 슬롯이 설정 파일과 일치하는지 검사한다. 이전 실패로 설정 파일과 실행 상태가 어긋났다면 먼저 이를 복구해야 한다.
+2. Nginx에서 `/health`를 호출해 현재 서비스 상태와 이전 release를 확인하고, 응답의 슬롯이 설정 파일과 일치하는지 검사한다. 이어 활성 슬롯 세 서버의 health와 릴리스 정보가 일치하는지 확인한다. 이전 실패로 설정 파일과 실행 상태가 어긋났다면 먼저 이를 복구해야 한다.
 3. 세 서버에 순서대로 비활성 슬롯 컨테이너를 생성한다. 기존 활성 슬롯은 계속 서비스한다. 비활성 슬롯의 교체 대상들을 모두 조회해 `owner=dongwook`, 슬롯 라벨과 할당 포트를 검사한 뒤 삭제한다. Blue를 재사용할 때는 1주차 legacy 컨테이너도 같은 절차로 처리하며, 하나라도 소유권이나 포트가 다르면 삭제 전에 중단한다.
 4. 각 서버의 로컬 `/health` 응답에서 상태와 service·version·release·commit·instance·slot을 함께 검사한다. 한 서버라도 실패하면 이후 서버 배포와 트래픽 전환을 진행하지 않는다.
 5. 세 서버가 모두 통과한 사실을 확인한 뒤, Nginx 서버에서도 새 포트의 `/health`를 호출해 상태와 배포 정보를 검사한다. 이 단계는 로컬 검사로 확인할 수 없는 LB와 App 사이 방화벽 문제를 확인한다.
 6. 기존 설정을 `.previous` 파일로 보관하고 새 템플릿을 적용한다. 템플릿이 변경되고 `nginx -t`가 성공하면 `Reload Dongwook Nginx` Handler를 notify하고, `meta: flush_handlers`로 즉시 실행한다. Handler의 실행 결과를 바로 assert하여 실패를 일반 Task 실패로 전달하므로 기존 `block/rescue`에서 복구한다. Handler의 `ignore_errors`는 이 결과 전달 용도이며, 실패를 배포 성공으로 처리하지 않는다. discovery 이후 설정 파일이 변경되었다면 덮어쓰지 않고 중단한다.
 7. Agent가 실제 Nginx 주소로 반복 요청하여 `/health`, `/version` 각각에서 세 instance를 모두 관측하고 새 release·commit·slot을 확인한다. 검증 실패 또는 설정 검사·Reload 실패 시 원래 설정을 복원하고 Reload한 뒤 이전 release를 검증한다. 복구에 성공해도 Jenkins 빌드는 실패로 남긴다.
-8. 성공 후에도 이전 슬롯 컨테이너는 유지한다. 다음 배포가 그 비활성 슬롯을 재사용할 때 교체한다.
+8. 성공 후 배포 전후 슬롯·릴리스를 `deployment-result.json`에 저장하고 Jenkins Artifact로 보관한다. 이전 슬롯 컨테이너는 유지하며, 다음 배포가 그 비활성 슬롯을 재사용할 때 교체한다. 기능 장애가 발견되면 [롤백 전용 Job](ROLLBACK.md#롤백-실행)에서 문제가 생긴 배포 빌드 번호로 이전 슬롯에 복구한다.
+
+배포·롤백 Job은 `dongwook-production` 잠금을 공유한다. 완료 기록이 생성된 배포 빌드는 자동 정리에서 제외한다. 보존 해제 기준은 [롤백 운영 안내](ROLLBACK.md#남겨-둔-검증과-제한)를 따른다.
 
 최초 전환에서는 기존 `dongwook-app`의 `slot=primary`를 blue로 인정하고 그대로 둔다. 이후 green이 활성화된 상태에서 blue로 배포할 때만 기존 컨테이너의 소유권과 `20003` 포트를 확인하고 삭제한 뒤 `dongwook-app-blue`를 생성한다.
 
@@ -201,7 +207,7 @@ Nginx Reload는 새 worker가 신규 연결을 받게 하고 기존 worker의 �
 
 Ansible의 `rescue`는 일반 Task 실패에 대응하며, unreachable 호스트나 프로세스 강제 종료를 복구해 주지는 않는다. [Ansible Blocks 문서](https://docs.ansible.com/projects/ansible-core/devel/playbook_guide/playbooks_blocks.html)
 
-수동 복구 시에는 실행 중인 배포를 먼저 멈추고 `.previous`의 대상 포트와 세 서버 응답을 확인한다. **다음 배포가 이전 슬롯을 재사용하기 시작했다면 `.previous`가 가리키는 컨테이너가 이미 교체되었을 수 있다.** 이전 release가 세 서버에 그대로 남아 있을 때만 해당 설정을 복원하고 `nginx -t` → Reload → Agent 검증을 진행한다. 컨테이너가 교체됐다면 Jenkins Artifact에 보관한 이전 digest로 재배포한다. 배포 후 모든 Artifact의 release와 실제 `/version`을 대조할 수 있다.
+수동 복구 시에는 배포·롤백 Job의 실행과 트리거를 먼저 막고 `.previous`의 대상 포트와 세 서버 응답을 확인한다. **다음 배포가 이전 슬롯을 재사용하기 시작했다면 `.previous`가 가리키는 컨테이너가 이미 교체되었을 수 있다.** 이전 release가 세 서버에 그대로 남아 있을 때만 해당 설정을 복원하고 `nginx -t` → Reload → Agent 검증을 진행한다. 컨테이너가 교체됐다면 Jenkins Artifact에 보관한 이전 digest로 재배포한다. 배포 후 모든 Artifact의 release와 실제 `/version`을 대조할 수 있다.
 
 ### 지속 요청으로 무중단 배포 검증
 
@@ -217,6 +223,7 @@ Jenkins Artifact에 다음 증거가 남는다. 성공·실패 빌드 모두 `po
 | Artifact | 내용 |
 | --- | --- |
 | `deploy-vars.json` | 배포할 이미지 digest와 Git 버전·release |
+| `deployment-result.json` | 완료된 배포의 전후 슬롯·릴리스, 원본 Job·빌드, 서버 구성 |
 | `availability/requests.jsonl` | 매 요청의 UTC 시간, 경과 시간, 단계, HTTP 상태, 지연, 버전, release, commit, instance, slot, hostname, 오류 |
 | `availability/summary.json` | 전체/단계별 요청 성공률, 실패 건수, p95 지연, 서버별 트래픽, 버전·슬롯 전환 순서, 판정 조건 |
 
@@ -226,7 +233,7 @@ Ansible의 Reload/전환 검증 실패는 `block/rescue`에서 자동 복구한�
 
 요구사항의 `v1 → v2`는 이전·신규 애플리케이션 버전을 의미한다. 1주차의 `v1`에서 첫 Git 버전으로 전환하거나, Job에 설정한 배포 브랜치에 서로 다른 두 커밋을 반영해 `git-<커밋 A> → git-<커밋 B>`로 검증한다. 같은 커밋을 재빌드하면 release만 달라지므로 과제의 버전 전환 증거에는 다른 커밋을 사용한다. 원시 로그의 `instance`는 실제 응답한 서버이며, `slot`과 `release`로 전환 전후를 구별한다.
 
-Jenkins 외부에서 실행해야 한다면 Agent에서 기존 Registry 환경변수를 준비하고, 다른 배포가 없는 상태에서 다음과 같이 실행한다.
+Jenkins 외부에서 실행해야 한다면 Agent에서 기존 Registry 환경변수를 준비하고, 배포·롤백 Job의 실행과 트리거를 막은 상태에서 다음과 같이 실행한다. 직접 실행은 Jenkins 잠금을 획득하지 않으며, Jenkins 빌드 Artifact도 자동으로 생성하지 않는다.
 
 ```bash
 export ANSIBLE_CONFIG="$PWD/ansible/ansible.cfg"
@@ -298,7 +305,7 @@ APP_VERSION=local .venv/bin/python -m uvicorn main:app --app-dir app --port 8080
 
 배포 전략과 자동화 요구사항은 코드로 구성했고, 무중단 배포를 관측하고 증거를 남길 도구도 준비했다. **실제 v1→v2 전환 동안 서비스가 정상 응답했다는 최종 판정은 아래 실서버 검증 후에만 가능하다.**
 
-### 로컬 검사 기록
+### 로컬 검사 기록 — 2026-10-11
 
 - 배포 보조 로직 테스트: **29개 통과**. 슬롯 판별, 잘못된 release/slot/instance 응답 거부, 전환 후 세 서버 확인, 재시도 한도, 성공률 계산, 단일 오류 보존, 정상 응답이 없는 baseline에서 배포 미실행, 부분 장애를 기록한 뒤 배포 진행, 배포 명령 실패 시 보고서 실패 처리를 확인했다.
 - `ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/deploy.yml --syntax-check` 통과.
