@@ -10,6 +10,7 @@ abstract class PipelineFixture extends Script {
     Map scm = [:]
     Map files = [:]
     List events = []
+    List operationPayloads = []
     Map building
     Closure rootStages
     Map rootPost = [:]
@@ -18,6 +19,8 @@ abstract class PipelineFixture extends Script {
     boolean unfinished = false
     boolean failAfterCommit = false
     boolean committed = false
+    boolean checkoutDeletesFiles = false
+    boolean checkoutThrows = false
     String pendingOwner
     final String report = 'practice/taehyeon/.canary/reports'
     final String imageId = 'sha256:' + '1' * 64
@@ -60,7 +63,11 @@ abstract class PipelineFixture extends Script {
     def agent(Closure c) {}
     def options(Closure c) {}
     def failFast(boolean value) {}
-    def checkout(Object value) { events << 'checkout' }
+    def checkout(Object value) {
+        events << 'checkout'
+        if(checkoutDeletesFiles) files.clear()
+        if(checkoutThrows) throw new IllegalStateException('Injected checkout failure')
+    }
     def script(Closure c) { invokeBody(c) }
     def dir(String path, Closure c) { invokeBody(c) }
     def sshagent(Map m, Closure c) { invokeBody(c) }
@@ -102,9 +109,10 @@ abstract class PipelineFixture extends Script {
                     break
                 case 'deployment-plan': jsonFile('deployment-plan.json',plan()); break
                 case 'rollback-prepare':
-                    jsonFile('rollback-plan.json',plan())
+                    jsonFile('rollback-plan.json',plan() + [release_manifest:[release_id:'prepared-target'],release_image_tar:'/old/workspace/image.tar'])
                     jsonFile('rollback-vars.json',[nginx_backends:[],deployment_state:plan().target_state]); break
                 case 'release-operation':
+                    operationPayloads << new LinkedHashMap(vars)
                     if(vars.operation_phase=='read') jsonFile('operation-status.json', [pending:unfinished,operation_id:pendingOwner ?: 'older-build'])
                     if(vars.operation_phase=='begin') { unfinished=true; pendingOwner=env.OPERATION_ID }
                     if(vars.operation_phase=='finalize') {
@@ -160,6 +168,13 @@ def cases=[
         assert p.events.count('ansible:release-operation:recover')==1
         assert !p.events.any{it.startsWith('ansible:canary-recover:')}
     },
+    operationPayloadDoesNotLeakPreparedManifest:{
+        def p=create(); p.params.ACTION='ROLLBACK'; p.run(); assert p.failure==null:p.failure
+        def mutations=p.operationPayloads.findAll{it.operation_phase in ['begin','finalize']}
+        assert mutations.size()==2
+        assert mutations.every{!it.containsKey('release_manifest') && !it.containsKey('release_image_tar')}
+        assert mutations.every{it.containsKey('before_state') && it.containsKey('target_state')}
+    },
     previousStateDoesNotOverwriteCandidateMetadata:{
         def p=create(); p.run(); assert p.failure==null:p.failure
         assert p.files.containsKey(p.report+'/baseline-vars.json')
@@ -168,6 +183,14 @@ def cases=[
         assert baseline.metadata.release=='build-41-oldsha'
         def deployment=new JsonSlurperClassic().parseText(p.files[p.report+'/deployment-vars.json'])
         assert deployment.release_id.startsWith('build-42-')
+    },
+    legacyRecoveryPrecedesCleaningCheckout:{
+        for (mode in ['checkoutDeletesFiles','checkoutThrows']) {
+            def p=create([(mode):true]); p.files[p.report+'/recovery-needed.json']='{}'; p.run()
+            assert p.failure==null:p.failure
+            assert p.events.contains('ansible:canary-recover:')
+            assert !p.events.contains('checkout')
+        }
     },
     legacyMarkerIsNotErased:{
         def p=create(); p.files[p.report+'/recovery-needed.json']='{}'; p.run()

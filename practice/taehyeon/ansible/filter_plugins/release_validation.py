@@ -101,13 +101,15 @@ def capture_release_runtime(container, image, host, slot):
     require(options.get('RestartPolicy') == {'Name': 'unless-stopped', 'MaximumRetryCount': 0}, 'Unsupported restart policy')
     require(options.get('NetworkMode') in ('bridge', 'default'), 'Unsupported network mode')
     require(set(container.get('NetworkSettings', {}).get('Networks', {})) == {'bridge'}, 'Unsupported network attachments')
-    for field in ('Privileged', 'ReadonlyRootfs', 'PublishAllPorts', 'AutoRemove', 'Binds', 'Mounts', 'VolumesFrom',
+    for field in ('Init', 'Privileged', 'ReadonlyRootfs', 'PublishAllPorts', 'AutoRemove', 'Binds', 'Mounts', 'VolumesFrom',
                   'CapAdd', 'CapDrop', 'Devices', 'DeviceRequests', 'SecurityOpt', 'ExtraHosts', 'Dns', 'DnsSearch',
                   'DnsOptions', 'Links', 'Tmpfs', 'PidMode', 'UTSMode', 'UsernsMode', 'Memory', 'MemorySwap',
                   'MemoryReservation', 'NanoCpus', 'CpuShares', 'CpuQuota', 'CpusetCpus', 'CpusetMems',
                   'Ulimits', 'Sysctls', 'GroupAdd', 'DeviceCgroupRules'):
         require(not options.get(field), 'Unsupported container option: ' + field)
     require(options.get('IpcMode', 'private') == 'private', 'Unsupported IPC mode')
+    require(options.get('ShmSize', 67108864) == 67108864, 'Custom shared-memory size is unsupported')
+    require(options.get('LogConfig', {}).get('Type', 'json-file') == 'json-file', 'Only the json-file logging driver is supported')
     require(not options.get('LogConfig', {}).get('Config'), 'Custom logging options are unsupported')
     for field in ('Entrypoint', 'Cmd', 'User', 'WorkingDir', 'Labels', 'Healthcheck', 'StopSignal'):
         require(config.get(field) == defaults.get(field), 'Container changes image defaults: ' + field)

@@ -50,11 +50,16 @@ def readReportJson(String name) {
 
 // 영구 상태가 복구 기준이다. 이전 workspace의 절대 경로에 의존하지 않는다.
 def runReleaseOperation(String phase, Map variables = [:]) {
+    // -e는 set_fact보다 우선한다. 내부 명세·임시 경로를 넘기지 않는다.
+    def payload = [:]
+    for (name in ['before_state', 'target_state', 'require_operation_owner']) {
+        if (variables.containsKey(name)) payload[name] = variables[name]
+    }
     runCanaryPlaybook('release-operation', [
         operation_phase: phase, operation_id: env.OPERATION_ID, operation_action: params.ACTION,
         observe_seconds: params.OBSERVE_SECONDS as int, min_samples: params.MIN_SAMPLES as int,
         max_response_ms: params.MAX_RESPONSE_MS as int
-    ] + variables, '')
+    ] + payload, '')
 }
 
 pipeline {
@@ -90,7 +95,6 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                checkout scm
                 script {
                     env.RECOVERY_ONLY = 'false'
                     env.OPERATION_STARTED = 'false'
@@ -110,6 +114,8 @@ pipeline {
                         writeFile file: "${env.REPORT_DIR}/result.json",
                                   text: '{"status":"legacy recovery completed; run again for a new operation"}'
                     } else {
+                        // SCM 정리보다 먼저 기존 workspace의 복구 자료를 확인한다.
+                        checkout scm
                         sh 'rm -rf "$REPORT_DIR" && mkdir -p "$REPORT_DIR"'
                         def variables = [app_name: env.APP_NAME,
                             canary_report_dir: "${pwd()}/${env.REPORT_DIR}",

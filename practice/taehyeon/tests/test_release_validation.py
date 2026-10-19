@@ -73,4 +73,16 @@ class ReleaseValidationTests(unittest.TestCase):
                 self.v.capture_release_runtime(value, image(), 'app1', 'a')
             self.assertNotIn('do-not-log-me', str(error.exception))
 
+    def test_runtime_rejects_init_option(self):
+        c=container(); c['HostConfig']['Init']=True
+        with self.assertRaises(ValueError): self.v.capture_release_runtime(c,image(),'app1','a')
+
+    def test_runtime_rejects_custom_shared_memory(self):
+        c=container(); c['HostConfig']['ShmSize']=134217728
+        with self.assertRaises(ValueError): self.v.capture_release_runtime(c,image(),'app1','a')
+
+    def test_runtime_rejects_different_logging_driver(self):
+        c=container(); c['HostConfig']['LogConfig']={'Type':'none','Config':{}}
+        with self.assertRaises(ValueError): self.v.capture_release_runtime(c,image(),'app1','a')
+
 if __name__ == '__main__': unittest.main()

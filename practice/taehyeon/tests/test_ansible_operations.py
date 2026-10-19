@@ -127,4 +127,18 @@ class OperationTests(ReleaseFixture, unittest.TestCase):
         self.assertNotEqual(self.run_phase('recover').returncode,0)
         self.assertEqual(self.live.read_text(),NGINX_A)
 
+    def test_rollback_begin_and_finalize_with_actual_cli_extra_variables(self):
+        self.write_state(self.after); self.live.write_text(NGINX_B)
+        target=dict(self.before, operation_id='build-43-ROLLBACK',operation_type='ROLLBACK')
+        self.params.update(before_state=self.after,target_state=target,
+            operation_id='build-43-ROLLBACK',operation_action='ROLLBACK')
+        payload={key:self.params[key] for key in ('before_state','target_state','operation_id','operation_action')}
+        self.assert_ok(self.run_release_fixture('operation-begin.yml',self.params,extra_variables=payload))
+        pending=json.loads((self.releases/'pending-operation.json').read_text())
+        self.assertEqual(pending['before_state']['release_id'],'build-42-newsha')
+        self.assertEqual(pending['target_state']['release_id'],'build-41-oldsha')
+        self.live.write_text(NGINX_A)
+        self.assert_ok(self.run_release_fixture('operation-finalize.yml',self.params,extra_variables=payload))
+        self.assertEqual(json.loads((self.releases/'state.json').read_text())['release_id'],'build-41-oldsha')
+
 if __name__=='__main__': unittest.main()

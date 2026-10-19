@@ -35,7 +35,7 @@ class ReleaseFixture:
         self.manifest['image']['archive_sha256'] = hashlib.sha256(self.image_tar.read_bytes()).hexdigest()
         self.manifest['nginx_sha256'] = hashlib.sha256(self.config.encode()).hexdigest()
 
-    def run_release_fixture(self, entrypoint, variables=None, files=None, extra_tasks=None, host='localhost'):
+    def run_release_fixture(self, entrypoint, variables=None, files=None, extra_tasks=None, host='localhost', extra_variables=None):
         for path, contents in (files or {}).items():
             target = self.root / path
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +57,10 @@ class ReleaseFixture:
         inventory.write_text(json.dumps({'all': {'hosts': {'localhost': {}}, 'children': {
             'app_servers': {'hosts': {h: {'ansible_host':'127.0.0.1'} for h in ('app1','app2','app3')}},
             'load_balancer': {'hosts': {'nginx': {'ansible_host':'127.0.0.1'}}}}}}))
-        result = subprocess.run(['ansible-playbook', '-i', str(inventory), str(play)], cwd=ANSIBLE,
+        command = ['ansible-playbook', '-i', str(inventory), str(play)]
+        if extra_variables is not None:
+            command += ['-e', json.dumps(extra_variables)]
+        result = subprocess.run(command, cwd=ANSIBLE,
             env=environment, capture_output=True, text=True)
         snapshot = {str(p.relative_to(self.releases)): p.read_bytes()
             for p in self.releases.rglob('*') if p.is_file()} if self.releases.exists() else {}
