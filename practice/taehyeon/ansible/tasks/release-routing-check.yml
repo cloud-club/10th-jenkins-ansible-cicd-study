@@ -1,0 +1,17 @@
+---
+- name: Validate the current state without requiring healthy current HTTP
+  ansible.builtin.set_fact:
+    current_state: "{{ current_state | validate_release_state }}"
+    nginx_targets: []
+- name: Describe the current single-slot routing
+  ansible.builtin.set_fact:
+    nginx_targets: "{{ nginx_targets + [{'host':item,'port':{'a':20001,'b':21001}[current_state.active_slot],'weight':1,'metadata':current_state.metadata}] }}"
+  loop: "{{ groups['app_servers'] }}"
+- name: Read live personal routing
+  ansible.builtin.slurp:
+    src: "{{ nginx_config_path | default('/etc/nginx/conf.d/taehyeon.conf') }}"
+  register: routing_blob
+- name: Reject contradictory routing before selecting a slot
+  ansible.builtin.assert:
+    that:
+      - routing_blob.content | b64decode == lookup('ansible.builtin.template', (lookup('ansible.builtin.config', 'DEFAULT_ROLES_PATH') | first) ~ '/nginx/templates/taehyeon.conf.j2')

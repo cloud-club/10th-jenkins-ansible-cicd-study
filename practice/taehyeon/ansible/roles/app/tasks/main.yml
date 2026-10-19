@@ -42,6 +42,27 @@
   changed_when: true
   # 전달받은 tar 파일을 Docker 이미지로 등록
 
+- name: Verify the loaded candidate image before replacing an inactive container
+  when: expected_image_id is defined
+  block:
+    - ansible.builtin.stat:
+        path: "{{ image_tar_remote }}"
+        checksum_algorithm: sha256
+      register: candidate_archive_stat
+    - ansible.builtin.assert:
+        that:
+          - candidate_archive_stat.stat.checksum == image_archive_sha256
+    - ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ app_name }}:{{ image_tag }}"]
+      register: loaded_candidate_image
+      become: true
+      changed_when: false
+      no_log: true
+    - ansible.builtin.assert:
+        that:
+          - (loaded_candidate_image.stdout | from_json | first).Id == expected_image_id
+      no_log: true
+
 # 첫 B 배포는 기존 week6 컨테이너를 유지한다. 이후 A가 비활성이 됐을 때만 정리한다.
 - name: Inspect legacy week6 container on inactive A
   become: true
@@ -100,7 +121,7 @@
       - "{{ app_host_port }}:{{ app_container_port }}"
       - --env
       - "APP_INSTANCE={{ inventory_hostname }}"
-      - "{{ app_name }}:{{ image_tag }}"
+      - "{{ expected_image_id | default(app_name ~ ':' ~ image_tag) }}"
   # 새 버전 컨테이너를 실행하고 서버별 인스턴스 이름 전달
 
 - name: Wait until the application health endpoint is ready

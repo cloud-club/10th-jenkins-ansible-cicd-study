@@ -1,0 +1,94 @@
+---
+- name: Select and validate the previous operating release
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    release_root: /var/lib/taehyeon-deploy
+    nginx_listen_port: 18001
+  tasks:
+    - ansible.builtin.import_tasks: ../tasks/release-scope.yml
+    - ansible.builtin.assert:
+        that:
+          - operation_phase in ['plan', 'prepare']
+          - operation_id | validate_release_id == operation_id
+    - ansible.builtin.slurp:
+        src: "{{ release_root }}/state.json"
+      register: rollback_state_blob
+    - ansible.builtin.set_fact:
+        current_state: "{{ rollback_state_blob.content | b64decode | from_json | validate_release_state }}"
+    - ansible.builtin.assert:
+        that: ["current_state.previous_release is not none"]
+        fail_msg: No previous operating release is available for rollback.
+    - ansible.builtin.include_tasks: ../tasks/release-routing-check.yml
+    - ansible.builtin.include_tasks: ../tasks/release-load.yml
+      vars:
+        requested_release: "{{ current_state.previous_release }}"
+    - name: Plan the opposite slot and the previous version
+      ansible.builtin.set_fact:
+        target_state:
+          schema_version: 1
+          active_slot: "{{ 'b' if current_state.active_slot == 'a' else 'a' }}"
+          metadata: "{{ release_manifest.metadata }}"
+          release_id: "{{ release_manifest.release_id }}"
+          previous_release: null
+          operation_id: "{{ operation_id }}"
+          operation_type: ROLLBACK
+    - name: Confirm ownership before preparing a target
+      when: operation_phase == 'prepare'
+      block:
+        - ansible.builtin.slurp:
+            src: "{{ release_root }}/pending-operation.json"
+          register: rollback_pending_blob
+        - ansible.builtin.set_fact:
+            pending_operation: "{{ rollback_pending_blob.content | b64decode | from_json }}"
+        - ansible.builtin.include_tasks: ../tasks/rollback-owner.yml
+    - ansible.builtin.copy:
+        content: "{{ {'before_state':current_state,'target_state':target_state,'release_manifest':release_manifest,'release_image_tar':release_image_tar} | to_nice_json }}"
+        dest: "{{ canary_report_dir }}/rollback-plan.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false
+
+- name: Prepare the previous release only in the inactive slots
+  hosts: app_servers
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - ansible.builtin.include_role:
+        name: app
+        tasks_from: ensure
+      vars:
+        active_slot: "{{ hostvars['nginx'].current_state.active_slot }}"
+        deploy_slot: "{{ hostvars['nginx'].target_state.active_slot }}"
+        release_manifest: "{{ hostvars['nginx'].release_manifest }}"
+        release_image_tar: "{{ hostvars['nginx'].release_image_tar }}"
+        expected_image_id: "{{ hostvars['nginx'].release_manifest.image.id }}"
+      when: operation_phase == 'prepare'
+
+- name: Export the prepared rollback routing
+  hosts: load_balancer
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  tasks:
+    - name: Generate verified previous-version targets
+      when: operation_phase == 'prepare'
+      block:
+        - ansible.builtin.set_fact:
+            rollback_backends: []
+        - ansible.builtin.set_fact:
+            rollback_backends: "{{ rollback_backends + [{'host':item,'port':{'a':20001,'b':21001}[target_state.active_slot],'weight':1,'metadata':target_state.metadata}] }}"
+          loop: "{{ groups['app_servers'] }}"
+        - ansible.builtin.copy:
+            content: "{{ {'nginx_backends':rollback_backends,'deployment_state':target_state} | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/rollback-vars.json"
+            mode: '0600'
+          delegate_to: localhost
+        - ansible.builtin.copy:
+            content: "{{ rollback_backends | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/rollback-backends.json"
+            mode: '0600'
+          delegate_to: localhost

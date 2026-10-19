@@ -1,0 +1,149 @@
+---
+- name: Protect the inactive personal slot
+  ansible.builtin.assert:
+    that:
+      - active_slot in ['a', 'b']
+      - deploy_slot in ['a', 'b'] and deploy_slot != active_slot
+      - inventory_hostname in ['app1', 'app2', 'app3']
+      - expected_image_id == (release_manifest | validate_release_manifest).image.id
+- name: Derive personal container and port
+  ansible.builtin.set_fact:
+    restore_container_name: "taehyeon-app-{{ deploy_slot }}"
+    restore_port: "{{ {'a':20001,'b':21001}[deploy_slot] }}"
+    restore_runtime: "{{ release_manifest.runtime[inventory_hostname] }}"
+    restore_reusable: false
+    restore_tar_remote: "/tmp/taehyeon-{{ release_manifest.release_id }}-restore.tar"
+- name: Recheck the source before using or replacing any container
+  ansible.builtin.stat:
+    path: "{{ release_image_tar }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: restore_source_stat
+- ansible.builtin.assert:
+    that:
+      - restore_source_stat.stat.checksum | default('') == release_manifest.image.archive_sha256
+- name: Inspect the existing inactive container
+  ansible.builtin.command:
+    argv: [docker, container, inspect, "{{ restore_container_name }}"]
+  register: restore_existing
+  changed_when: false
+  failed_when: restore_existing.rc not in [0, 1]
+  no_log: true
+- name: Determine whether the existing container can be reused
+  when: restore_existing.rc == 0
+  block:
+    - ansible.builtin.set_fact:
+        restore_existing_container: "{{ restore_existing.stdout | from_json | first }}"
+      no_log: true
+    - ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ restore_existing_container.Image }}"]
+      register: restore_existing_image
+      changed_when: false
+      no_log: true
+    - ansible.builtin.set_fact:
+        restore_existing_runtime: "{{ restore_existing_container | capture_release_runtime(restore_existing_image.stdout | from_json | first, inventory_hostname, deploy_slot) }}"
+      no_log: true
+    - ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ restore_port }}{{ item }}"
+        return_content: true
+        timeout: 5
+      loop: [/health, /version]
+      register: reusable_api
+      failed_when: false
+      when: restore_existing_container.Image == expected_image_id and restore_existing_runtime == restore_runtime and restore_existing_container.State.Running
+    - ansible.builtin.set_fact:
+        restore_reusable: "{{ restore_existing_container.Image == expected_image_id and restore_existing_runtime == restore_runtime and restore_existing_container.State.Running and reusable_api.results | default([]) | selectattr('status', 'defined') | list | length == 2 and reusable_api.results[0].status == 200 and reusable_api.results[1].status == 200 and reusable_api.results[0].json | default({}) == dict(release_manifest.metadata, instance=inventory_hostname, status='UP') and reusable_api.results[1].json.version | default('') == release_manifest.metadata.version and reusable_api.results[1].json.gitSha | default('') == release_manifest.metadata.gitSha and reusable_api.results[1].json.release | default('') == release_manifest.metadata.release and reusable_api.results[1].json.instance | default('') == inventory_hostname }}"
+  rescue:
+    - name: Replace an unsupported or unhealthy inactive container
+      ansible.builtin.set_fact:
+        restore_reusable: false
+- name: Restore a missing or mismatched inactive container
+  when: not restore_reusable
+  block:
+    - ansible.builtin.copy:
+        src: "{{ release_image_tar }}"
+        dest: "{{ restore_tar_remote }}"
+        mode: '0600'
+    - ansible.builtin.stat:
+        path: "{{ restore_tar_remote }}"
+        checksum_algorithm: sha256
+      register: restore_remote_stat
+    - ansible.builtin.assert:
+        that: ["restore_remote_stat.stat.checksum == release_manifest.image.archive_sha256"]
+    - ansible.builtin.command:
+        argv: [docker, load, -i, "{{ restore_tar_remote }}"]
+      changed_when: true
+    - ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ expected_image_id }}"]
+      register: restored_image
+      changed_when: false
+      no_log: true
+    - name: Check loaded image identity and defaults before removing anything
+      ansible.builtin.assert:
+        that:
+          - (restored_image.stdout | from_json | first).Id == expected_image_id
+          - (restored_image.stdout | from_json | first).Config.Entrypoint == restore_runtime.entrypoint
+          - ((restored_image.stdout | from_json | first).Config.Cmd | default([], true)) == restore_runtime.command
+      no_log: true
+    - name: Inspect legacy inactive A only
+      ansible.builtin.command:
+        argv: [docker, container, inspect, taehyeon-app]
+      register: restore_legacy
+      changed_when: false
+      failed_when: restore_legacy.rc not in [0, 1]
+      when: deploy_slot == 'a'
+      no_log: true
+    - name: Remove legacy inactive A only
+      ansible.builtin.command:
+        argv: [docker, container, rm, --force, taehyeon-app]
+      changed_when: true
+      when: deploy_slot == 'a' and restore_legacy.rc | default(1) == 0
+    - name: Replace only the inactive personal container
+      ansible.builtin.command:
+        argv: [docker, container, rm, --force, "{{ restore_container_name }}"]
+      changed_when: true
+      when: restore_existing.rc == 0
+    - name: Run the recorded image and application environment
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --detach
+          - --name
+          - "{{ restore_container_name }}"
+          - --restart
+          - unless-stopped
+          - --publish
+          - "{{ restore_port }}:8080"
+          - --env
+          - "APP_VERSION={{ restore_runtime.environment.APP_VERSION }}"
+          - --env
+          - "GIT_SHA={{ restore_runtime.environment.GIT_SHA }}"
+          - --env
+          - "RELEASE_ID={{ restore_runtime.environment.RELEASE_ID }}"
+          - --env
+          - "APP_INSTANCE={{ inventory_hostname }}"
+          - "{{ expected_image_id }}"
+      changed_when: true
+  always:
+    - ansible.builtin.file:
+        path: "{{ restore_tar_remote }}"
+        state: absent
+- name: Verify both APIs on the restored target
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ restore_port }}{{ item }}"
+    return_content: true
+    status_code: 200
+    timeout: 5
+  loop: [/health, /version]
+  register: restored_api
+  retries: 10
+  delay: 3
+  until:
+    - restored_api.status | default(0) == 200
+    - restored_api.json.version | default('') == release_manifest.metadata.version
+    - restored_api.json.gitSha | default('') == release_manifest.metadata.gitSha
+    - restored_api.json.release | default('') == release_manifest.metadata.release
+    - restored_api.json.instance | default('') == inventory_hostname
+    - item != '/health' or restored_api.json.status | default('') == 'UP'

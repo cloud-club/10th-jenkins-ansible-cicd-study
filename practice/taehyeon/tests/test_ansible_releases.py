@@ -20,7 +20,7 @@ class FixtureResult:
     files: dict
     docker_calls: list
 
-class AnsibleReleaseTests(unittest.TestCase):
+class ReleaseFixture:
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -50,9 +50,14 @@ class AnsibleReleaseTests(unittest.TestCase):
         play = self.root / 'fixture.json'
         play.write_text(json.dumps([{'hosts': host, 'connection': 'local', 'gather_facts': False,
             'vars': fixture_vars, 'tasks': tasks}]))
-        environment = dict(os.environ, ANSIBLE_CONFIG=str(ANSIBLE / 'ansible.cfg'),
+        environment = dict(os.environ, **getattr(self, 'extra_env', {}))
+        environment.update(ANSIBLE_CONFIG=str(ANSIBLE / 'ansible.cfg'),
             ANSIBLE_LOCAL_TEMP=str(self.root / 'ansible-local'), ANSIBLE_REMOTE_TEMP=str(self.root / 'ansible-remote'))
-        result = subprocess.run(['ansible-playbook', '-i', host + ',', str(play)], cwd=ANSIBLE,
+        inventory = self.root / 'inventory.json'
+        inventory.write_text(json.dumps({'all': {'hosts': {'localhost': {}}, 'children': {
+            'app_servers': {'hosts': {h: {'ansible_host':'127.0.0.1'} for h in ('app1','app2','app3')}},
+            'load_balancer': {'hosts': {'nginx': {'ansible_host':'127.0.0.1'}}}}}}))
+        result = subprocess.run(['ansible-playbook', '-i', str(inventory), str(play)], cwd=ANSIBLE,
             env=environment, capture_output=True, text=True)
         snapshot = {str(p.relative_to(self.releases)): p.read_bytes()
             for p in self.releases.rglob('*') if p.is_file()} if self.releases.exists() else {}
@@ -64,6 +69,7 @@ class AnsibleReleaseTests(unittest.TestCase):
     def store(self, **changes):
         return self.run_release_fixture('release-store.yml', changes)
 
+class AnsibleReleaseTests(ReleaseFixture, unittest.TestCase):
     def test_archive_is_complete_before_publish(self):
         result = self.store()
         self.assert_ok(result)
