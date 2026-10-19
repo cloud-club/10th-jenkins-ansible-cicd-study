@@ -1,0 +1,42 @@
+---
+- name: Validate release identifier before using it in a path
+  ansible.builtin.set_fact:
+    verified_release_id: "{{ requested_release | validate_release_id }}"
+- name: Inspect immutable release directory
+  ansible.builtin.stat:
+    path: "{{ release_root }}/releases/{{ verified_release_id }}"
+    follow: false
+  register: release_directory_stat
+- name: Require a complete release directory rather than a link
+  ansible.builtin.assert:
+    that:
+      - release_directory_stat.stat.isdir | default(false)
+      - not release_directory_stat.stat.islnk | default(false)
+- name: Inspect release files without following links
+  ansible.builtin.stat:
+    path: "{{ release_root }}/releases/{{ verified_release_id }}/{{ item }}"
+    follow: false
+    checksum_algorithm: sha256
+  loop: [manifest.json, image.tar, nginx.conf]
+  register: release_file_stats
+- name: Require regular release files
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - not item.stat.islnk | default(false)
+  loop: "{{ release_file_stats.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+- name: Read stored manifest
+  ansible.builtin.slurp:
+    src: "{{ release_root }}/releases/{{ verified_release_id }}/manifest.json"
+  register: release_manifest_blob
+- name: Validate manifest schema
+  ansible.builtin.set_fact:
+    release_manifest: "{{ release_manifest_blob.content | b64decode | from_json | validate_release_manifest }}"
+- name: Check immutable release checksums and identity
+  ansible.builtin.assert:
+    that:
+      - release_manifest.release_id == verified_release_id
+      - release_file_stats.results[1].stat.checksum == release_manifest.image.archive_sha256
+      - release_file_stats.results[2].stat.checksum == release_manifest.nginx_sha256

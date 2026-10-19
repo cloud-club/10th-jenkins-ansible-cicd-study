@@ -3,7 +3,7 @@
 - name: Read active slot and verify existing deployment without changing it
   hosts: load_balancer
   gather_facts: false
-  become: false
+  become: true
   any_errors_fatal: true
   tasks:
     - name: Require a local snapshot destination
@@ -78,12 +78,8 @@
       loop_control:
         label: "{{ item.item }}"
 
-    - name: Save verified baseline into the Jenkins workspace
-      ansible.builtin.copy:
-        content: "{{ {'active_slot':stable_slot, 'metadata':stable_metadata} | to_nice_json }}"
-        dest: "{{ snapshot_path }}"
-        mode: '0600'
-      delegate_to: localhost
+    - name: Preserve the complete verified baseline
+      ansible.builtin.include_tasks: ../tasks/release-snapshot.yml
 
     - name: Prepare observation and recovery files when called by Jenkins
       when: canary_report_dir is defined
@@ -104,6 +100,7 @@
             dest: "{{ canary_report_dir }}/baseline-backends.json"
             mode: '0600'
           delegate_to: localhost
+          become: false
 
         - name: Save emergency routing variables
           ansible.builtin.copy:
@@ -111,13 +108,15 @@
             dest: "{{ canary_report_dir }}/recovery-vars.json"
             mode: '0600'
           delegate_to: localhost
+          become: false
 
         - name: Save emergency state variables
           ansible.builtin.copy:
-            content: "{{ {'deployment_state':{'active_slot':stable_slot,'metadata':stable_metadata}} | to_nice_json }}"
+            content: "{{ {'deployment_state':stored_state | combine({'active_slot':stable_slot,'metadata':stable_metadata})} | to_nice_json }}"
             dest: "{{ canary_report_dir }}/previous-state-vars.json"
             mode: '0600'
           delegate_to: localhost
+          become: false
 
         - name: Calculate both releases for continuous HTTP monitoring
           ansible.builtin.include_tasks: ../tasks/canary-backends.yml
@@ -130,3 +129,4 @@
             dest: "{{ canary_report_dir }}/monitor-backends.json"
             mode: '0600'
           delegate_to: localhost
+          become: false

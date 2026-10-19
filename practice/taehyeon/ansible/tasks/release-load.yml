@@ -1,0 +1,22 @@
+---
+- name: Verify stored release before transfer
+  ansible.builtin.include_tasks: release-verify.yml
+- name: Set the local archive destination
+  ansible.builtin.set_fact:
+    release_image_tar: "{{ canary_report_dir }}/{{ verified_release_id }}-image.tar"
+- name: Fetch verified image from persistent storage
+  ansible.builtin.fetch:
+    src: "{{ release_root }}/releases/{{ verified_release_id }}/image.tar"
+    dest: "{{ release_image_tar }}"
+    flat: true
+- name: Inspect transferred image checksum
+  ansible.builtin.stat:
+    path: "{{ release_image_tar }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: fetched_image_stat
+- name: Verify transferred image
+  ansible.builtin.assert:
+    that:
+      - fetched_image_stat.stat.checksum == release_manifest.image.archive_sha256

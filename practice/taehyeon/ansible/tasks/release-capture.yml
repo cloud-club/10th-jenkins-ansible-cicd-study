@@ -1,0 +1,34 @@
+---
+- name: Inspect active personal slot without logging raw container environment
+  ansible.builtin.command:
+    argv: [docker, container, inspect, "taehyeon-app-{{ active_slot }}"]
+  register: active_container_inspect
+  changed_when: false
+  failed_when: active_container_inspect.rc not in [0, 1]
+  no_log: true
+- name: Recognize only the legacy week6 container on slot A
+  ansible.builtin.command:
+    argv: [docker, container, inspect, taehyeon-app]
+  register: legacy_active_inspect
+  changed_when: false
+  when: active_container_inspect.rc == 1 and active_slot == 'a'
+  no_log: true
+- name: Require an existing active personal container
+  ansible.builtin.assert:
+    that:
+      - active_container_inspect.rc == 0 or (active_slot == 'a' and legacy_active_inspect.rc | default(1) == 0)
+- name: Select active container inspection
+  ansible.builtin.set_fact:
+    captured_container: "{{ (active_container_inspect.stdout if active_container_inspect.rc == 0 else legacy_active_inspect.stdout) | from_json | first }}"
+  no_log: true
+- name: Inspect the actual running image by ID
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ captured_container.Image }}"]
+  register: captured_image_inspect
+  changed_when: false
+  no_log: true
+- name: Capture supported runtime without exporting raw inspect data
+  ansible.builtin.set_fact:
+    captured_image_id: "{{ captured_container.Image }}"
+    captured_runtime: "{{ captured_container | capture_release_runtime(captured_image_inspect.stdout | from_json | first, inventory_hostname, active_slot) }}"
+  no_log: true
