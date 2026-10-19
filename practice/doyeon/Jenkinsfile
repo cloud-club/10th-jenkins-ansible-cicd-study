@@ -30,38 +30,54 @@ PY
 pipeline {
   agent { label 'ansible-agent' }
   options {
+    skipDefaultCheckout(true)
     disableConcurrentBuilds()
     timestamps()
   }
   parameters {
-    string(name: 'APP_VERSION', defaultValue: 'v1', description: 'v1 또는 v2')
+    string(name: 'APP_VERSION', defaultValue: 'v1', description: 'v1, v2 또는 장애 재현용 v3')
     choice(name: 'DEPLOY_MODE', choices: ['bootstrap', 'rolling'], description: '첫 배포 또는 롤링 배포')
     choice(name: 'ROLLING_BATCH_SIZE', choices: ['1', '2'], description: '롤링 배포 시 동시에 교체할 앱 서버 수')
+    choice(name: 'FAILURE_SCENARIO', choices: ['none', 'health', 'startup'], description: '장애 재현: Health Check 실패 또는 실행 실패')
   }
   environment {
     APP_VERSION = "${params.APP_VERSION}"
     DEPLOY_MODE = "${params.DEPLOY_MODE}"
     ROLLING_BATCH_SIZE = "${params.ROLLING_BATCH_SIZE ?: '1'}"
+    FAILURE_SCENARIO = "${params.FAILURE_SCENARIO ?: 'none'}"
   }
   stages {
-    stage('Checkout') {
-      steps { checkout scm }
-    }
-    stage('Test and build') {
+    stage('Build and validate') {
       steps {
+        checkout scm
         script {
           if (!(params.APP_VERSION ==~ /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/)) {
             error('Invalid APP_VERSION')
           }
           env.RELEASE_ID = "${params.APP_VERSION}-${env.BUILD_NUMBER}"
-          env.IMAGE_REF = "dodopoo/doyeon-app:${env.RELEASE_ID}"
+          withCredentials([usernamePassword(
+            credentialsId: 'doyeon-dockerhub',
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_TOKEN'
+          )]) {
+            env.IMAGE_REF = "${env.DOCKER_USER}/doyeon-app:${env.RELEASE_ID}"
+          }
         }
         dir('practice/doyeon/app') {
           sh 'python3 -m unittest test_main.py -v'
           sh '''
             docker build --build-arg APP_VERSION="$APP_VERSION" \
               --build-arg RELEASE_ID="$RELEASE_ID" \
+              --build-arg FAILURE_SCENARIO="$FAILURE_SCENARIO" \
               -t "$IMAGE_REF" .
+          '''
+        }
+        dir('practice/doyeon/ansible') {
+          sh '''
+            ansible-inventory --graph
+            for playbook in bootstrap rolling snapshot prepare-rollback rollback verify; do
+              ansible-playbook "playbooks/$playbook.yml" --syntax-check
+            done
           '''
         }
       }
@@ -84,14 +100,28 @@ pipeline {
         }
       }
     }
-    stage('Verify Ansible targets and syntax') {
+    stage('Preserve healthy release') {
+      when { expression { params.DEPLOY_MODE != 'bootstrap' } }
       steps {
         dir('practice/doyeon/ansible') {
-          sh '''
-            ansible-inventory --graph
-            ansible-playbook "playbooks/$DEPLOY_MODE.yml" --list-hosts
-            ansible-playbook "playbooks/$DEPLOY_MODE.yml" --syntax-check
-          '''
+          sshagent(credentials: ['doyeon-app-ssh']) {
+            sh '''
+              ansible-playbook playbooks/snapshot.yml \
+                -e "snapshot_path=$WORKSPACE/.doyeon-previous-release"
+            '''
+            script {
+              def previous = readFile("${env.WORKSPACE}/.doyeon-previous-release").trim().split('\n')
+              if (previous.size() != 2) { error('Invalid previous release snapshot') }
+              env.PREVIOUS_VERSION = previous[0]
+              env.PREVIOUS_RELEASE = previous[1]
+            }
+            sh '''
+              ansible-playbook playbooks/prepare-rollback.yml \
+                -e "rollback_version=$PREVIOUS_VERSION" \
+                -e "rollback_release=$PREVIOUS_RELEASE"
+            '''
+            script { env.ROLLBACK_READY = 'true' }
+          }
         }
       }
     }
@@ -100,31 +130,25 @@ pipeline {
         dir('practice/doyeon/ansible') {
           sshagent(credentials: ['doyeon-app-ssh']) {
             sh '''
+              set -e
               ansible-playbook "playbooks/$DEPLOY_MODE.yml" \
-                -e "image_ref=$IMAGE_REF" \
-                -e "app_version=$APP_VERSION" \
-                -e "release_id=$RELEASE_ID" \
-                -e "rolling_batch_size=$ROLLING_BATCH_SIZE"
+                -e "image_ref=$IMAGE_REF" -e "app_version=$APP_VERSION" \
+                -e "release_id=$RELEASE_ID" -e "rolling_batch_size=$ROLLING_BATCH_SIZE"
             '''
           }
         }
       }
     }
-    stage('Verify through Nginx') {
+    stage('Verify all backends and Nginx') {
       steps {
-        sh '''
-          python3 - <<'PY'
-import json, os, urllib.request
-base = "http://1.201.116.156:18005"
-for path in ("/health", "/version"):
-    with urllib.request.urlopen(base + path, timeout=5) as response:
-        assert response.status == 200
-        data = json.load(response)
-    assert data["version"] == os.environ["APP_VERSION"], data
-    assert data["release"] == os.environ["RELEASE_ID"], data
-    print(path, data)
-PY
-        '''
+        dir('practice/doyeon/ansible') {
+          sshagent(credentials: ['doyeon-app-ssh']) {
+            sh '''
+              ansible-playbook playbooks/verify.yml \
+                -e "app_version=$APP_VERSION" -e "release_id=$RELEASE_ID"
+            '''
+          }
+        }
       }
     }
   }
@@ -135,10 +159,33 @@ PY
           docker image rm "$IMAGE_REF" || true
         fi
         rm -rf "$WORKSPACE/.doyeon-docker-config"
+        rm -f "$WORKSPACE/.doyeon-previous-release"
       '''
     }
     success { script { notifyDiscord('✅ 성공') } }
-    failure { script { notifyDiscord('❌ 실패') } }
+    failure {
+      script {
+        if (env.ROLLBACK_READY == 'true') {
+          try {
+            dir('practice/doyeon/ansible') {
+              sshagent(credentials: ['doyeon-app-ssh']) {
+                sh '''
+                  ansible-playbook playbooks/rollback.yml \
+                    -e "rollback_version=$PREVIOUS_VERSION" \
+                    -e "rollback_release=$PREVIOUS_RELEASE"
+                '''
+              }
+            }
+            notifyDiscord('❌ 배포 실패 · 이전 정상 릴리스로 복구 완료')
+          } catch (rollbackError) {
+            echo "Automatic rollback failed: ${rollbackError}"
+            notifyDiscord('🚨 배포 및 자동 롤백 실패 · 수동 확인 필요')
+          }
+        } else {
+          notifyDiscord('❌ 실패')
+        }
+      }
+    }
     aborted { script { notifyDiscord('⚠️ 중단') } }
   }
 }

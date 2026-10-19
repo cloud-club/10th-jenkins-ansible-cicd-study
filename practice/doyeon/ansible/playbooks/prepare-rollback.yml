@@ -1,0 +1,28 @@
+---
+- name: Preserve the healthy release on every backend before deployment
+  hosts: app_servers
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Read the current health response
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/health"
+        status_code: 200
+        timeout: 5
+      register: current_health
+      failed_when: >-
+        current_health.status != 200 or current_health.json.status != 'ok' or
+        current_health.json.version != rollback_version or
+        current_health.json.release != rollback_release or
+        current_health.json.instance != inventory_hostname
+
+    - name: Read the current container image ID
+      ansible.builtin.command:
+        argv: [docker, container, inspect, --format, "{% raw %}{{.Image}}{% endraw %}", "{{ container_name }}"]
+      register: current_image_id
+      changed_when: false
+
+    - name: Keep this host's exact running image for rollback
+      ansible.builtin.command:
+        argv: [docker, image, tag, "{{ current_image_id.stdout }}", "{{ rollback_image_ref }}"]

@@ -1,0 +1,33 @@
+---
+- name: Verify each backend after deployment
+  hosts: app_servers
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Check exact release and health directly
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/health"
+        status_code: 200
+        timeout: 5
+      register: final_health
+      failed_when: >-
+        final_health.status != 200 or final_health.json.status != 'ok' or
+        final_health.json.version != app_version or
+        final_health.json.release != release_id or
+        final_health.json.instance != inventory_hostname
+
+- name: Verify the load balancer after deployment
+  hosts: load_balancers
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Check exact release through Nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nginx_port }}/health"
+        status_code: 200
+        timeout: 5
+      register: final_lb_health
+      failed_when: >-
+        final_lb_health.status != 200 or final_lb_health.json.status != 'ok' or
+        final_lb_health.json.version != app_version or
+        final_lb_health.json.release != release_id

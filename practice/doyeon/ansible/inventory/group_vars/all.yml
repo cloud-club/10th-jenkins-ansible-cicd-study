@@ -4,3 +4,4 @@ nginx_port: 18005
 container_name: doyeon-app
 nginx_config: /etc/nginx/conf.d/doyeon.conf
 lb_host: doyeon_lb
+rollback_image_ref: doyeon-app:rollback

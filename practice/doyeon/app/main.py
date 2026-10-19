@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -11,7 +12,7 @@ def payload(path):
         "instance": os.environ.get("INSTANCE_ID", "local"),
     }
     if path == "/health":
-        result["status"] = "ok"
+        result["status"] = "fail" if os.environ.get("FAILURE_SCENARIO") == "health" else "ok"
     return result
 
 
@@ -21,7 +22,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.dumps(payload(self.path)).encode()
-        self.send_response(200)
+        self.send_response(503 if self.path == "/health" and os.environ.get("FAILURE_SCENARIO") == "health" else 200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
@@ -30,4 +31,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if os.environ.get("FAILURE_SCENARIO") == "startup":
+        sys.exit("Intentional startup failure")
     ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()

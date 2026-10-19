@@ -34,6 +34,23 @@
       changed_when: false
       failed_when: active_backend.rc != 0 or active_backend.stdout != '1'
 
+- name: Pull the release image on every backend before any traffic change
+  hosts: app_servers
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Require an explicit image
+      ansible.builtin.assert:
+        that:
+          - image_ref is defined
+          - image_ref | length > 0
+
+    - name: Pull the release image while all backends still serve traffic
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: pull
+
 - name: Drain, deploy, check, and rejoin one batch at a time
   hosts: app_servers
   become: true
@@ -55,6 +72,10 @@
   tasks:
     - name: Deploy the current batch
       block:
+        - name: Remember that no container in this batch has been touched yet
+          ansible.builtin.set_fact:
+            batch_container_touched: false
+
         - name: Drain each backend in this batch without concurrent Nginx edits
           ansible.builtin.lineinfile:
             path: "{{ nginx_config }}"
@@ -90,6 +111,10 @@
             seconds: 3
           run_once: true
 
+        - name: Remember that containers in this batch are being replaced
+          ansible.builtin.set_fact:
+            batch_container_touched: true
+
         - name: Replace and verify the application container
           ansible.builtin.include_role:
             name: app
@@ -124,8 +149,36 @@
           run_once: true
 
       rescue:
+        - name: Put the batch back in the upstream when no container was touched
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ hostvars[item].ansible_host | regex_escape }}:{{ app_port }} down;$"
+            line: "    server {{ hostvars[item].ansible_host }}:{{ app_port }};"
+            backrefs: true
+          loop: "{{ ansible_play_batch }}"
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+          when: not (batch_container_touched | default(true))
+
+        - name: Reload Nginx with the restored upstream when it validates
+          ansible.builtin.shell: nginx -t && systemctl reload nginx
+          delegate_to: "{{ lb_host }}"
+          run_once: true
+          register: restore_reload
+          changed_when: restore_reload.rc == 0
+          failed_when: false
+          when: not (batch_container_touched | default(true))
+
+        - name: Stop the rollout; the backend was restored to traffic
+          ansible.builtin.fail:
+            msg: >-
+              Rolling deployment stopped at {{ inventory_hostname }} before any container was replaced.
+              The upstream line in {{ nginx_config }} was restored. Fix the cause and run the rollout again.
+          when: not (batch_container_touched | default(true))
+
         - name: Stop the rollout and leave an unverified backend out of traffic
           ansible.builtin.fail:
             msg: >-
               Rolling deployment stopped at {{ inventory_hostname }}.
               Check its direct /health and {{ nginx_config }} before re-enabling traffic.
+          when: batch_container_touched | default(true)

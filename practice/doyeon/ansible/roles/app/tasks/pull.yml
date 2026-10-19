@@ -1,0 +1,18 @@
+---
+# Release tags are unique per Jenkins build (for example v2-4), so an image that
+# is already present locally for this tag is the exact image to deploy.
+- name: Check whether the release image is already present
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ image_ref }}"]
+  register: image_present
+  failed_when: false
+  changed_when: false
+
+- name: Pull the exact release image when it is missing
+  ansible.builtin.command:
+    argv: [docker, pull, "{{ image_ref }}"]
+  register: image_pull
+  retries: 3
+  delay: 5
+  until: image_pull.rc == 0
+  when: image_present.rc != 0

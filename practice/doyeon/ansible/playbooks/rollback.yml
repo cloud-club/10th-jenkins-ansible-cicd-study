@@ -1,0 +1,141 @@
+---
+- name: Restore each backend to its preserved healthy image
+  hosts: app_servers
+  become: true
+  gather_facts: false
+  strategy: linear
+  order: sorted
+  serial: 1
+  tasks:
+    - name: Restore this backend
+      block:
+        - name: Require the saved image on this host
+          ansible.builtin.command:
+            argv: [docker, image, inspect, "{{ rollback_image_ref }}"]
+          changed_when: false
+
+        - name: Drain this backend if it is active
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ ansible_host | regex_escape }}:{{ app_port }}(?: down)?;$"
+            line: "    server {{ ansible_host }}:{{ app_port }} down;"
+            backrefs: true
+          delegate_to: "{{ lb_host }}"
+          register: drained
+
+        - name: Require exactly one drained upstream line
+          ansible.builtin.command:
+            argv:
+              - grep
+              - -Fxc
+              - "    server {{ ansible_host }}:{{ app_port }} down;"
+              - "{{ nginx_config }}"
+          delegate_to: "{{ lb_host }}"
+          register: drained_line
+          changed_when: false
+          failed_when: drained_line.rc != 0 or drained_line.stdout != '1'
+
+        - name: Validate the drained Nginx configuration
+          ansible.builtin.command: nginx -t
+          delegate_to: "{{ lb_host }}"
+          changed_when: false
+
+        - name: Reload Nginx with this backend drained
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+          delegate_to: "{{ lb_host }}"
+
+        - name: Restore and verify the previous release
+          ansible.builtin.include_role:
+            name: app
+          vars:
+            image_ref: "{{ rollback_image_ref }}"
+            app_version: "{{ rollback_version }}"
+            release_id: "{{ rollback_release }}"
+
+        - name: Rejoin this healthy backend at normal weight
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ ansible_host | regex_escape }}:{{ app_port }} down;$"
+            line: "    server {{ ansible_host }}:{{ app_port }};"
+            backrefs: true
+          delegate_to: "{{ lb_host }}"
+          register: rejoined
+
+        - name: Require the drained line to have been restored
+          ansible.builtin.assert:
+            that: rejoined.changed
+
+        - name: Validate the restored Nginx configuration
+          ansible.builtin.command: nginx -t
+          delegate_to: "{{ lb_host }}"
+          changed_when: false
+
+        - name: Reload Nginx with the healthy backend rejoined
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+          delegate_to: "{{ lb_host }}"
+      rescue:
+        - name: Remove an unverified backend from the upstream
+          ansible.builtin.lineinfile:
+            path: "{{ nginx_config }}"
+            regexp: "^    server {{ ansible_host | regex_escape }}:{{ app_port }};$"
+            line: "    server {{ ansible_host }}:{{ app_port }} down;"
+            backrefs: true
+          delegate_to: "{{ lb_host }}"
+          register: rescue_drain
+          failed_when: false
+
+        - name: Check Nginx before applying the safe upstream
+          ansible.builtin.command: nginx -t
+          delegate_to: "{{ lb_host }}"
+          register: rescue_nginx_check
+          changed_when: false
+          failed_when: false
+
+        - name: Apply the safe upstream when Nginx validates
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+          delegate_to: "{{ lb_host }}"
+          when: rescue_nginx_check.rc == 0
+          failed_when: false
+
+        - name: Report failed recovery
+          ansible.builtin.fail:
+            msg: >-
+              Rollback failed on {{ inventory_hostname }}. Inspect the container, direct /health,
+              {{ nginx_config }}, and Nginx reload result before routing traffic to this backend.
+
+- name: Verify every backend and the load balancer after rollback
+  hosts: app_servers
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Check restored release directly
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/version"
+        status_code: 200
+        timeout: 5
+      register: restored
+      failed_when: >-
+        restored.status != 200 or restored.json.version != rollback_version or
+        restored.json.release != rollback_release or
+        restored.json.instance != inventory_hostname
+
+- name: Verify the load balancer after rollback
+  hosts: load_balancers
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Check restored release through Nginx
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nginx_port }}/version"
+        status_code: 200
+        timeout: 5
+      register: restored_lb
+      failed_when: >-
+        restored_lb.status != 200 or restored_lb.json.version != rollback_version or
+        restored_lb.json.release != rollback_release
