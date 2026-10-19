@@ -37,6 +37,12 @@
           - deployment_state.metadata.release | length > 0
       tags: [validate]
 
+    - name: Validate extended state when supplied
+      ansible.builtin.assert:
+        that: ["deployment_state | validate_release_state == deployment_state"]
+      when: deployment_state.schema_version is defined
+      tags: [validate]
+
     # 선택한 상태를 Jenkins 결과 확인용 파일로 Agent에 저장한다(localhost는 Ansible 실행 서버).
     - name: Export the selected state for the Jenkins result report
       ansible.builtin.copy:

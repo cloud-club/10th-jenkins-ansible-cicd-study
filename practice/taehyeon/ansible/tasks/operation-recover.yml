@@ -1,0 +1,65 @@
+---
+- ansible.builtin.include_tasks: operation-read.yml
+- name: Recover or finalize only the persisted operation
+  when: operation_status.pending
+  block:
+    - ansible.builtin.include_tasks: operation-pending.yml
+    - name: Require ownership when called by a failing build
+      ansible.builtin.assert:
+        that: ["pending_operation.operation_id == operation_id"]
+      when: require_operation_owner | default(false) | bool
+    - name: Reject unrelated state instead of overwriting it
+      ansible.builtin.assert:
+        that:
+          - current_state == pending_operation.before_state or current_state == pending_operation.target_state
+    - ansible.builtin.set_fact:
+        operation_was_committed: "{{ current_state == pending_operation.target_state }}"
+        operation_observe_state: "{{ current_state if current_state == pending_operation.target_state else pending_operation.before_state }}"
+    - name: Check the selected recovery release
+      ansible.builtin.include_tasks: release-verify.yml
+      vars:
+        requested_release: "{{ operation_observe_state.release_id }}"
+    - name: Restore the original routing only when not committed
+      when: not operation_was_committed
+      block:
+        - ansible.builtin.slurp:
+            src: "{{ release_root }}/operations/{{ pending_operation.before_nginx_file }}"
+          register: operation_original_config
+        - ansible.builtin.assert:
+            that:
+              - operation_original_config.content | b64decode | hash('sha256') == pending_operation.before_nginx_sha256
+        - ansible.builtin.file:
+            path: "{{ nginx_stage_dir | default('/tmp/taehyeon-nginx') }}"
+            state: directory
+            mode: '0700'
+        - ansible.builtin.copy:
+            content: "{{ operation_original_config.content | b64decode }}"
+            dest: "{{ nginx_stage_dir | default('/tmp/taehyeon-nginx') }}/recovery.conf"
+            mode: '0600'
+        - ansible.builtin.copy:
+            src: "{{ (lookup('ansible.builtin.config', 'DEFAULT_ROLES_PATH') | first) }}/nginx/files/apply-config.sh"
+            dest: "{{ nginx_stage_dir | default('/tmp/taehyeon-nginx') }}/apply-config.sh"
+            mode: '0750'
+        - name: Restore personal config using the existing shared Nginx lock
+          ansible.builtin.command:
+            argv:
+              - /bin/bash
+              - "{{ nginx_stage_dir | default('/tmp/taehyeon-nginx') }}/apply-config.sh"
+              - "{{ nginx_stage_dir | default('/tmp/taehyeon-nginx') }}/recovery.conf"
+              - "{{ nginx_config_path | default('/etc/nginx/conf.d/taehyeon.conf') }}"
+              - "{{ nginx_stage_dir | default('/tmp/taehyeon-nginx') }}/recovery-before.conf"
+              - "{{ nginx_lock_path | default('/var/lock/nginx-cicd.lock') }}"
+          changed_when: true
+    - name: Check actual routing before verifying HTTP
+      ansible.builtin.include_tasks: release-routing-check.yml
+      vars:
+        routing_state: "{{ operation_observe_state }}"
+    - ansible.builtin.include_tasks: operation-observe.yml
+    - name: Save the verified operating state
+      ansible.builtin.copy:
+        content: "{{ operation_observe_state | validate_release_state | to_nice_json }}"
+        dest: "{{ release_root }}/state.json"
+        mode: '0600'
+    - ansible.builtin.set_fact:
+        operation_resolution: "{{ 'finalized' if operation_was_committed else 'recovered' }}"
+    - ansible.builtin.include_tasks: operation-record.yml

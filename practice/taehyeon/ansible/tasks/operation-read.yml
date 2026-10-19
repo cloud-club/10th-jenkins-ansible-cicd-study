@@ -1,0 +1,34 @@
+---
+- ansible.builtin.stat:
+    path: "{{ release_root }}/state.json"
+  register: operation_state_stat
+- ansible.builtin.stat:
+    path: "{{ release_root }}/pending-operation.json"
+  register: operation_pending_stat
+- ansible.builtin.slurp:
+    src: "{{ release_root }}/state.json"
+  register: operation_state_blob
+  when: operation_state_stat.stat.exists
+- ansible.builtin.set_fact:
+    current_state: "{{ (operation_state_blob.content | b64decode | from_json | validate_release_state(true)) if operation_state_stat.stat.exists else {} }}"
+    pending_operation: null
+- ansible.builtin.slurp:
+    src: "{{ release_root }}/pending-operation.json"
+  register: operation_pending_blob
+  when: operation_pending_stat.stat.exists
+- ansible.builtin.set_fact:
+    pending_operation: "{{ operation_pending_blob.content | b64decode | from_json }}"
+  when: operation_pending_stat.stat.exists
+- ansible.builtin.set_fact:
+    operation_status:
+      pending: "{{ operation_pending_stat.stat.exists }}"
+      resolution: none
+      operation_id: "{{ pending_operation.operation_id if operation_pending_stat.stat.exists else none }}"
+      status: "{{ 'pending' if operation_pending_stat.stat.exists else 'ready' }}"
+      error: null
+- ansible.builtin.copy:
+    content: "{{ operation_status | to_nice_json }}"
+    dest: "{{ canary_report_dir }}/operation-status.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false

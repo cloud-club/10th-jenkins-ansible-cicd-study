@@ -1,0 +1,35 @@
+---
+- ansible.builtin.set_fact:
+    operation_observe_targets: []
+- ansible.builtin.set_fact:
+    operation_observe_targets: "{{ operation_observe_targets + [{'host':item,'port':{'a':20001,'b':21001}[operation_observe_state.active_slot],'weight':1,'metadata':operation_observe_state.metadata}] }}"
+  loop: "{{ groups['app_servers'] }}"
+- ansible.builtin.copy:
+    content: "{{ operation_observe_targets | to_nice_json }}"
+    dest: "{{ canary_report_dir }}/recovery-backends.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+- name: Verify the recovered version and all three instances through Nginx
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ (lookup('ansible.builtin.config', 'DEFAULT_ROLES_PATH') | first) }}/../../scripts/observe.py"
+      - stage
+      - --url
+      - "{{ operation_observe_url | default('http://1.201.116.156:18001') }}"
+      - --backends-file
+      - "{{ canary_report_dir }}/recovery-backends.json"
+      - --report
+      - "{{ canary_report_dir }}/recovery.jsonl"
+      - --percent
+      - '0'
+      - --seconds
+      - "{{ observe_seconds | default(60) | string }}"
+      - --min-samples
+      - "{{ min_samples | default(100) | string }}"
+      - --max-response-ms
+      - "{{ max_response_ms | default(2000) | string }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false

@@ -1,11 +1,11 @@
 ---
 - name: Validate the current state without requiring healthy current HTTP
   ansible.builtin.set_fact:
-    current_state: "{{ current_state | validate_release_state }}"
+    routing_checked_state: "{{ routing_state | default(current_state) | validate_release_state }}"
     nginx_targets: []
 - name: Describe the current single-slot routing
   ansible.builtin.set_fact:
-    nginx_targets: "{{ nginx_targets + [{'host':item,'port':{'a':20001,'b':21001}[current_state.active_slot],'weight':1,'metadata':current_state.metadata}] }}"
+    nginx_targets: "{{ nginx_targets + [{'host':item,'port':{'a':20001,'b':21001}[routing_checked_state.active_slot],'weight':1,'metadata':routing_checked_state.metadata}] }}"
   loop: "{{ groups['app_servers'] }}"
 - name: Read live personal routing
   ansible.builtin.slurp:

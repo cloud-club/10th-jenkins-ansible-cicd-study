@@ -1,0 +1,16 @@
+---
+- name: Validate pending operation before reading referenced files
+  ansible.builtin.assert:
+    that:
+      - pending_operation is mapping
+      - pending_operation.keys() | sort == ['action','before_nginx_file','before_nginx_sha256','before_state','operation_id','schema_version','target_state']
+      - pending_operation.schema_version == 1
+      - pending_operation.operation_id | validate_release_id == pending_operation.operation_id
+      - pending_operation.action in ['DEPLOY', 'ROLLBACK']
+      - pending_operation.before_nginx_file == pending_operation.operation_id ~ '-before.conf'
+      - pending_operation.before_nginx_sha256 is match('^[0-9a-f]{64}$')
+      - pending_operation.before_state | validate_release_state == pending_operation.before_state
+      - pending_operation.target_state | validate_release_state == pending_operation.target_state
+      - pending_operation.target_state.operation_id == pending_operation.operation_id
+      - pending_operation.target_state.operation_type == pending_operation.action
+      - pending_operation.before_state.active_slot != pending_operation.target_state.active_slot

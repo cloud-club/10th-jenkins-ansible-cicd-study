@@ -1,0 +1,28 @@
+---
+- name: Manage the durable personal deployment operation
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    release_root: /var/lib/taehyeon-deploy
+    nginx_listen_port: 18001
+  tasks:
+    - ansible.builtin.import_tasks: ../tasks/release-scope.yml
+    - ansible.builtin.assert:
+        that:
+          - operation_phase in ['read', 'begin', 'finalize', 'recover']
+          - operation_id | validate_release_id == operation_id
+    - name: Execute the selected operation phase
+      block:
+        - ansible.builtin.include_tasks: "../tasks/operation-{{ operation_phase }}.yml"
+      rescue:
+        - name: Keep a local failure report without exposing raw inputs
+          ansible.builtin.copy:
+            content: "{{ {'pending':true,'resolution':'none','operation_id':operation_id,'status':'failed','error':'Operation failed; inspect Ansible task output and persistent marker'} | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/operation-status.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false
+        - ansible.builtin.fail:
+            msg: Operation failed; persisted state and marker require inspection before a new deployment.
