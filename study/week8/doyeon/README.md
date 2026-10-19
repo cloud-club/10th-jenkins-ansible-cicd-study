@@ -5,12 +5,12 @@
 ## 동작 순서
 
 1. Jenkins가 새 이미지를 빌드·푸시한다.  `FAILURE_SCENARIO=health`이면 `/health`가 503과 `status=fail`을 반환하고, `startup`이면 앱 프로세스가 시작 즉시 종료한다. 기본값 `none`은 정상 이미지다.
-2. 롤링 배포 전에 `snapshot.yml`이 세 서버의 직접 `/health`를 확인하고, 버전과 릴리스가 같은지 검사해 Jenkins Workspace에 기록한다. `prepare-rollback.yml`은 각 서버에서 현재 컨테이너의 **이미지 ID**를 `doyeon-app:rollback`으로 보존한다. 롤백은 레지스트리의 이전 태그나 네트워크 상태에 의존하지 않는다.
+2. 롤링 배포 전에 `prepare-rollback.yml`이 세 서버의 직접 `/health`를 확인하고, 버전과 릴리스가 같은지 검사해 Jenkins Workspace에 기록한 뒤, 각 서버에서 현재 컨테이너의 **이미지 ID**를 `doyeon-app:rollback`으로 보존한다. 롤백은 레지스트리의 이전 태그나 네트워크 상태에 의존하지 않는다.
 3. 기존 `rolling.yml`이 배치별로 Nginx에서 서버를 제외하고, 컨테이너를 교체한 뒤 직접 Health Check와 버전을 검사한다. 실패하면 다음 배치를 중단한다.
 4. Jenkins가 배포 또는 최종 검증의 실패를 감지하면 `rollback.yml`을 실행한다. 서버별로 트래픽을 제외하고 보존 이미지를 다시 실행해 정확한 이전 버전·릴리스·서버 ID를 확인한 뒤 Nginx에 복귀시킨다. 마지막에 모든 서버와 Nginx 응답을 다시 검사한다. **배포 Job의 결과는 실패로 유지**하고 알림에 복구 성공/실패를 구분한다.
 5. 정상 배포라면 `verify.yml`이 세 서버 각각의 `/health`와 Nginx 경유 `/health`를 검사한다.
 
-롤백 이미지를 유지하기 위해 앱 서버에서 이전 이미지를 즉시 지우던 작업을 제거했다. 서버의 이미지 사용량은 별도로 관찰해야 한다. `bootstrap`은 최초 설치 모드로 롤백 대상이 없어 이 자동 복구 흐름에 포함하지 않는다.
+롤백 이미지는 배포와 최종 검증이 성공할 때까지 서버에 유지한다. 성공하면 `cleanup-rollback.yml`이 `doyeon-app:rollback` 태그와 현재 실행 중인 것 외의 Doyeon 이미지를 삭제한다. 정리 단계가 실패해도 배포 결과는 성공으로 유지하고 단계만 UNSTABLE로 표시한다. 실패한 배포에서는 정리하지 않는다. `bootstrap`은 최초 설치 모드로 롤백 대상이 없어 이 자동 복구 흐름에 포함하지 않는다.
 
 ## 재현 절차
 
@@ -30,7 +30,7 @@
 | 앱 실행 실패 | `FAILURE_SCENARIO=startup python3 main.py`가 의도대로 종료 코드 1을 반환 |
 | 로컬 Docker 정상/장애 이미지 | `none` 이미지의 `/health`는 HTTP 200·`status=ok`, `health` 이미지는 HTTP 503·`status=fail`, `startup` 컨테이너는 종료 코드 1을 확인 |
 | 로컬 이전 이미지 재실행 | 정상 v2 이미지에 테스트용 롤백 태그를 붙여 새 컨테이너로 실행한 뒤 `/health` HTTP 200과 이전 릴리스를 확인. Ansible/Nginx를 포함한 전체 롤백 검증은 아님 |
-| Ansible 문법 | `bootstrap`, `rolling`, `snapshot`, `prepare-rollback`, `rollback`, `verify` 문법 검사 통과 |
+| Ansible 문법 | `bootstrap`, `rolling`, `prepare-rollback`, `rollback`, `cleanup-rollback`, `verify` 문법 검사 통과. `cleanup-rollback`과 통합된 `prepare-rollback`은 Jenkins에서 실행해 검증하지 않음 |
 | 가비아 VM 장애 재현 | 2026-10-19 실제 앱 서버 3대와 LB에 Ansible로 접속. 세 서버가 모두 `v2-7`임을 확인하고 각 서버의 실행 이미지에 `doyeon-app:rollback` 태그를 붙임. `linux/amd64` 장애 이미지 `v3-live-health-20261019`를 세 서버에 로드한 뒤 `rolling.yml` 실행. 첫 서버 `doyeon_app1`의 `/health`가 12회 연속 HTTP 503·`status=fail`이어서 배포가 실패 코드 2로 중단됐고, 나머지 두 서버는 교체되지 않음 |
 | 가비아 VM 롤백 및 최종 검증 | 실패 직후 `rollback.yml`을 실행해 세 서버를 보존한 `v2-7` 이미지로 순차 복구. 앱 서버 3대 직접 `/version`, LB `/version` 검사 통과. 별도 `verify.yml`에서도 앱 서버 3대 직접 `/health`와 LB `/health`가 모두 `v2-7`로 통과 |
 | 연속 요청 | 장애 배포와 복구를 포함한 180초 동안 LB `/version`에 766회 요청. HTTP 실패 0회, 766회 모두 `v2-7`; 앱1 130회, 앱2 322회, 앱3 314회 응답. 원본 CSV는 이 실행 환경의 `/private/tmp/doyeon-week8-live-probe-20261019.csv`에 기록 |

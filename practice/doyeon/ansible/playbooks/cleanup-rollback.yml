@@ -1,0 +1,38 @@
+---
+# Runs only after the new release passed verify.yml. Removes the preserved
+# rollback image and every other Doyeon image except the one now running.
+# Failures here must never fail the deployment, because rollback.yml needs the
+# preserved image until this point.
+- name: Remove rollback images that are no longer needed
+  hosts: app_servers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove the rollback tag
+      ansible.builtin.command:
+        argv: [docker, rmi, "{{ rollback_image_ref }}"]
+      register: rollback_tag_removed
+      failed_when: false
+      changed_when: rollback_tag_removed.rc == 0
+
+    - name: List Doyeon image tags
+      ansible.builtin.command:
+        argv:
+          - docker
+          - image
+          - ls
+          - --filter
+          - "reference=*/doyeon-app"
+          - --format
+          - "{% raw %}{{.Repository}}:{{.Tag}}{% endraw %}"
+      register: doyeon_images
+      failed_when: false
+      changed_when: false
+
+    - name: Remove old Doyeon images
+      ansible.builtin.command:
+        argv: [docker, rmi, "{{ item }}"]
+      loop: "{{ doyeon_images.stdout_lines | default([]) | reject('equalto', image_ref) | list }}"
+      register: old_images_removed
+      failed_when: false
+      changed_when: old_images_removed.rc == 0

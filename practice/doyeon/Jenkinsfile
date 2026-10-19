@@ -75,7 +75,7 @@ pipeline {
         dir('practice/doyeon/ansible') {
           sh '''
             ansible-inventory --graph
-            for playbook in bootstrap rolling snapshot prepare-rollback rollback verify; do
+            for playbook in bootstrap rolling prepare-rollback rollback cleanup-rollback verify; do
               ansible-playbook "playbooks/$playbook.yml" --syntax-check
             done
           '''
@@ -106,7 +106,7 @@ pipeline {
         dir('practice/doyeon/ansible') {
           sshagent(credentials: ['doyeon-app-ssh']) {
             sh '''
-              ansible-playbook playbooks/snapshot.yml \
+              ansible-playbook playbooks/prepare-rollback.yml \
                 -e "snapshot_path=$WORKSPACE/.doyeon-previous-release"
             '''
             script {
@@ -115,11 +115,6 @@ pipeline {
               env.PREVIOUS_VERSION = previous[0]
               env.PREVIOUS_RELEASE = previous[1]
             }
-            sh '''
-              ansible-playbook playbooks/prepare-rollback.yml \
-                -e "rollback_version=$PREVIOUS_VERSION" \
-                -e "rollback_release=$PREVIOUS_RELEASE"
-            '''
             script { env.ROLLBACK_READY = 'true' }
           }
         }
@@ -147,6 +142,20 @@ pipeline {
               ansible-playbook playbooks/verify.yml \
                 -e "app_version=$APP_VERSION" -e "release_id=$RELEASE_ID"
             '''
+          }
+        }
+      }
+    }
+    stage('Clean up rollback images') {
+      when { expression { env.ROLLBACK_READY == 'true' } }
+      steps {
+        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+          dir('practice/doyeon/ansible') {
+            sshagent(credentials: ['doyeon-app-ssh']) {
+              sh '''
+                ansible-playbook playbooks/cleanup-rollback.yml -e "image_ref=$IMAGE_REF"
+              '''
+            }
           }
         }
       }
