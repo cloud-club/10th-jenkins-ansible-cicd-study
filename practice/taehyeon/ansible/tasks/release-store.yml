@@ -1,0 +1,92 @@
+---
+- name: Validate the archive manifest before writing anything
+  ansible.builtin.set_fact:
+    archive_record: "{{ archive_manifest | validate_release_manifest }}"
+- name: Verify local source image checksum
+  ansible.builtin.stat:
+    path: "{{ archive_image_tar }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: archive_source_stat
+- name: Require complete source material
+  ansible.builtin.assert:
+    that:
+      - archive_source_stat.stat.isreg | default(false)
+      - archive_source_stat.stat.checksum == archive_record.image.archive_sha256
+      - archive_nginx_config | hash('sha256') == archive_record.nginx_sha256
+- name: Create private release storage
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0700'
+  loop: ["{{ release_root }}", "{{ release_root }}/releases", "{{ release_root }}/operations"]
+- name: Check whether this release was already published
+  ansible.builtin.stat:
+    path: "{{ release_root }}/releases/{{ archive_record.release_id }}"
+    follow: false
+  register: archived_release_stat
+- name: Validate and reuse an existing immutable release
+  when: archived_release_stat.stat.exists
+  block:
+    - name: Verify existing release files
+      ansible.builtin.include_tasks: release-verify.yml
+      vars:
+        requested_release: "{{ archive_record.release_id }}"
+    - name: Refuse changes to an existing release
+      ansible.builtin.assert:
+        that:
+          - release_manifest.metadata == archive_record.metadata
+          - release_manifest.image.id == archive_record.image.id
+          - release_manifest.runtime == archive_record.runtime
+          - release_manifest.nginx_sha256 == archive_record.nginx_sha256
+- name: Publish a new complete release
+  when: not archived_release_stat.stat.exists
+  block:
+    - name: Allocate staging directory on the same filesystem
+      ansible.builtin.tempfile:
+        state: directory
+        path: "{{ release_root }}/releases"
+        prefix: ".{{ archive_record.release_id }}-"
+      register: release_staging
+    - name: Copy image into private staging directory
+      ansible.builtin.copy:
+        src: "{{ archive_image_tar }}"
+        dest: "{{ release_staging.path }}/image.tar"
+        mode: '0600'
+    - name: Write manifest into staging
+      ansible.builtin.copy:
+        content: "{{ archive_record | to_nice_json }}"
+        dest: "{{ release_staging.path }}/manifest.json"
+        mode: '0600'
+    - name: Write personal routing snapshot into staging
+      ansible.builtin.copy:
+        content: "{{ archive_nginx_config }}"
+        dest: "{{ release_staging.path }}/nginx.conf"
+        mode: '0600'
+    - name: Check staged image after copying
+      ansible.builtin.stat:
+        path: "{{ release_staging.path }}/image.tar"
+        checksum_algorithm: sha256
+      register: staged_image
+    - name: Require a complete staged image
+      ansible.builtin.assert:
+        that:
+          - staged_image.stat.checksum == archive_record.image.archive_sha256
+    - name: Publish the complete directory atomically
+      ansible.builtin.command:
+        argv: [mv, "{{ release_staging.path }}", "{{ release_root }}/releases/{{ archive_record.release_id }}"]
+      changed_when: true
+  always:
+    - name: Remove an unpublished staging directory
+      ansible.builtin.file:
+        path: "{{ release_staging.path }}"
+        state: absent
+      when: release_staging.path is defined
+- name: Export archive identity for the current report
+  ansible.builtin.copy:
+    content: "{{ archive_record | to_nice_json }}"
+    dest: "{{ canary_report_dir }}/archived-release.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false

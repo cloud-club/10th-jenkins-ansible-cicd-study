@@ -1,0 +1,8 @@
+---
+- name: Require this exact rollback operation before changing a slot
+  ansible.builtin.assert:
+    that:
+      - pending_operation.operation_id == operation_id
+      - pending_operation.action == 'ROLLBACK'
+      - pending_operation.before_state == current_state
+      - pending_operation.target_state == target_state

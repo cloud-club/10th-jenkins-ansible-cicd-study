@@ -1,0 +1,26 @@
+---
+- ansible.builtin.include_tasks: operation-read.yml
+- ansible.builtin.include_tasks: operation-pending.yml
+- name: Require the same operation and original state
+  ansible.builtin.assert:
+    that:
+      - pending_operation.operation_id == operation_id
+      - pending_operation.action == operation_action
+      - pending_operation.target_state == target_state
+      - current_state == pending_operation.before_state or current_state == pending_operation.target_state
+- ansible.builtin.include_tasks: release-verify.yml
+  vars:
+    requested_release: "{{ pending_operation.target_state.release_id }}"
+- ansible.builtin.assert:
+    that: ["release_manifest.metadata == pending_operation.target_state.metadata"]
+- ansible.builtin.include_tasks: release-routing-check.yml
+  vars:
+    routing_state: "{{ pending_operation.target_state }}"
+- name: Atomically commit the operating version after the caller's HTTP verification
+  ansible.builtin.copy:
+    content: "{{ pending_operation.target_state | validate_release_state | to_nice_json }}"
+    dest: "{{ release_root }}/state.json"
+    mode: '0600'
+- ansible.builtin.set_fact:
+    operation_resolution: finalized
+- ansible.builtin.include_tasks: operation-record.yml

@@ -1,0 +1,26 @@
+---
+- name: Derive the next operating state in Ansible
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    release_root: /var/lib/taehyeon-deploy
+  tasks:
+    - ansible.builtin.import_tasks: ../tasks/release-scope.yml
+    - ansible.builtin.include_tasks: ../tasks/operation-read.yml
+    - ansible.builtin.assert:
+        that:
+          - not operation_status.pending
+          - current_state | validate_release_state == current_state
+          - release_id != current_state.release_id
+    - ansible.builtin.include_tasks: ../tasks/release-verify.yml
+      vars:
+        requested_release: "{{ release_id }}"
+    - name: Plan the opposite slot and remember the actual operating predecessor
+      ansible.builtin.copy:
+        content: "{{ {'before_state':current_state,'target_state':{'schema_version':1,'active_slot':'b' if current_state.active_slot == 'a' else 'a','metadata':release_manifest.metadata,'release_id':release_manifest.release_id,'previous_release':current_state.release_id,'operation_id':operation_id,'operation_type':'DEPLOY'}} | to_nice_json }}"
+        dest: "{{ canary_report_dir }}/deployment-plan.json"
+        mode: '0600'
+      delegate_to: localhost
+      become: false

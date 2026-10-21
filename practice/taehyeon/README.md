@@ -1,7 +1,9 @@
 # 태현 CI/CD 실습
 
 이론 정리는 `study/`, 실습 코드는 `practice/taehyeon/`에서 관리한다.
-week7은 기존 서비스를 유지하며 새 버전 트래픽을 10% → 50% → 100%로 확대하는 카나리 배포다.
+week8에서는 성공한 배포를 직전 운영 버전으로 되돌리는 사후 롤백을 추가했다. 실행 방법과 보관·복구 범위는 [사후 롤백 실습](docs/rollback.md)을 참고한다.
+
+기존 week7은 기존 서비스를 유지하며 새 버전 트래픽을 10% → 50% → 100%로 확대하는 카나리 배포다.
 Jenkins가 단계와 실패 처리를 제어하고, Ansible이 슬롯 선택·가중치 계산·VM 변경·복구를 수행한다. Python은 HTTP 관찰과 집계만 담당한다.
 
 아키텍처와 배포 흐름, Playbook별 역할, 모니터링 고민은 [카나리 배포 정리](docs/canary-deployment.md)에서 확인할 수 있다.
@@ -53,7 +55,7 @@ practice/taehyeon/
 
 ## Jenkins 설정
 
-- 기존 개인 배포 Job의 SCM Branch: `*/week7/taehyeon` (원격에 브랜치 반영 후 설정)
+- 기존 개인 배포 Job의 SCM Branch: `*/week8/taehyeon` (원격에 브랜치 반영 후 설정)
 - Pipeline Script Path: `practice/taehyeon/Jenkinsfile`
 - Agent Label: `ansible-agent`
 - SSH Credential ID: `taehyeon-appserver-ssh`, SSH Agent 플러그인 필요
@@ -65,6 +67,7 @@ practice/taehyeon/
 
 | Parameter | 기본값 | 의미 |
 | --- | --- | --- |
+| ACTION | DEPLOY | 새 버전 배포 또는 직전 운영 버전 ROLLBACK |
 | OBSERVE_SECONDS | 60 | baseline·각 단계·복구 관찰 시간(초) |
 | MIN_SAMPLES | 100 | 각 관찰에서 필요한 최소 `/version` 응답 수 |
 | MAX_RESPONSE_MS | 2000 | 개별 HTTP 요청의 최대 허용 응답 시간(ms) |
@@ -121,43 +124,20 @@ HTTP/메타데이터 오류나 응답 시간 초과가 있으면 승격하지 �
 
 ## 실패와 복구
 
-- baseline 실패: 앱이나 Nginx 설정을 변경하지 않고 중단한다.
-- 신규 슬롯 배포 실패: 후속 배포를 중단하며 기존 슬롯 컨테이너는 유지한다.
-- 트래픽 적용 이후 실패: 기존 슬롯 100%로 설정하고 상태 파일을 이전 값으로 복원한 뒤 기존 메타데이터 응답을 검증한다.
-- 최종 상태 저장 실패도 같은 복구 절차를 수행한다.
-- 복구 실패: 배포 오류는 Jenkins 로그에 남고, `result.json`에 복구 오류를 추가한다. 복구가 성공해도 원래 배포는 실패로 유지한다.
+week8의 복구 기준은 Nginx VM의 `/var/lib/taehyeon-deploy/`다. 이미지·실행 설정·개인 Nginx 설정은 `releases/<release-id>/`에, 현재/직전 운영 버전은 `state.json`에, 미완료 작업은 `pending-operation.json`에 저장한다. Jenkins 작업 폴더와 빌드 Artifacts가 없어도 서버의 자료로 복구할 수 있다.
 
-Jenkins의 실패·취소 후 처리(`post unsuccessful`)에서 Ansible 복구 Playbook을 실행한다.
-첫 트래픽 변경 전에 `recovery-needed.json`을 기록하고, 정상 승격 또는 복구 관찰을 통과해야 삭제한다.
-복구는 `canary-recover.yml`이 라우팅 0% 적용 → 기존 상태 기록 → HTTP 검증 순서로 수행한다. 새 SSH 인증을 사용하며, 복구에 실패하면 마커를 유지한다.
-다음 빌드에서도 이 파일이 남아 있으면 신규 배포를 중단하고 복구부터 수행한다.
-SIGKILL, Agent 유실, 네트워크 단절에서는 복구 완료를 보장할 수 없다.
-이때 Agent workspace 또는 Artifact의 복구 파일과 실제 응답을 확인한다.
-SSH Credential이 제공된 Agent workspace에서 다음 명령으로 저장된 복구를 재시도할 수 있다.
+- 배포 완료 후 장애: 같은 Jenkins Job에서 `ACTION=ROLLBACK`을 실행한다. 현재 버전의 HTTP 정상 여부를 요구하지 않고 직전 버전을 비활성 슬롯에 준비·검증한 뒤 100% 전환한다.
+- 정상 이전 슬롯이 있으면 이미지 ID·실행 설정·두 API를 확인해 재사용한다. 없으면 보관 이미지의 체크섬과 ID를 검사한 뒤 같은 이미지를 재생성한다.
+- 배포나 롤백 도중 실패: 서버의 pending 마커와 확정된 상태를 비교해 원래 라우팅을 복구하거나 이미 완료된 작업을 검증·정리한다. 성공한 상태를 보고서 오류만으로 되돌리지 않는다.
+- Agent 유실·강제 종료: 다음 빌드가 서버의 pending 작업부터 복구하고 종료한다. 새 작업은 별도 실행한다. SSH 단절 중 즉시 복구까지 보장하지 않는다.
+- 복구 검증 실패: pending을 유지하고 실패를 보고한다. 파일을 지워 검사를 우회하지 않는다.
+- 최초 이관 시 예전 `.canary/reports/recovery-needed.json`이 있으면 기존 복구를 먼저 실행하고 종료한다. 이후 새 실행부터 영구 자료를 사용한다.
 
-```bash
-cd practice/taehyeon/ansible
-ansible-playbook -i inventory/hosts.ini playbooks/canary-recover.yml \
-  -e @../.canary/reports/deployment-vars.json \
-  -e @../.canary/reports/recovery-needed.json
-```
+`canary-recover.yml`은 이전 workspace 마커의 이관 복구용이다. week8 배포의 수동 복구에는 [사후 롤백 문서](docs/rollback.md)의 `release-operation.yml` 절차를 사용한다. 기존 `canary-commit.yml`을 직접 호출해 확장 상태를 덮어쓰지 않는다.
 
-복구 Playbook을 사용할 수 없으면 `recovery-vars.json`, `previous-state-vars.json`으로 아래 작업을 수행하고,
-기존 버전의 두 API와 세 인스턴스가 정상인지 별도로 검증한다. 복구 파일을 삭제해 신규 배포를 강행하지 않는다.
+롤백 성공 후 기본 롤백 대상은 비워 같은 버튼을 다시 눌러 장애 버전으로 왕복하지 않게 한다. 이후 새 배포가 성공하면 그 직전 운영 버전이 다시 복구 대상이 된다.
 
-```bash
-cd practice/taehyeon/ansible
-ansible-playbook -i inventory/hosts.ini playbooks/canary-route.yml \
-  -e @../.canary/reports/recovery-vars.json
-# 라우팅 검사가 통과하면 상태 기록도 복원
-ansible-playbook -i inventory/hosts.ini playbooks/canary-commit.yml \
-  -e @../.canary/reports/previous-state-vars.json
-```
-
-상태 파일과 실제 API가 다르면 다음 배포는 중단된다. 파일을 삭제해 우회하지 않는다.
-이전 슬롯은 다음 배포의 복구 기준이므로 자동 정리하지 않는다.
-Nginx reload는 기존 공통 잠금 `/var/lock/nginx-cicd.lock`을 사용한다.
-다른 사람의 배포도 동일 잠금을 사용해야 공통 reload를 직렬화할 수 있다.
+이전 슬롯은 다음 배포 전까지 유지하고 릴리스 자료는 자동 삭제하지 않는다. Nginx reload는 기존 공통 잠금 `/var/lock/nginx-cicd.lock`을 사용한다.
 
 ## 로컬 검증
 
@@ -174,7 +154,7 @@ Ansible/Jinja2가 같은 Python 환경에 있는 경우 전체 테스트를 실�
 python3 -m unittest discover -s practice/taehyeon/tests -p 'test_*.py'
 cd practice/taehyeon/ansible
 ansible-playbook -i inventory/hosts.ini playbooks/deploy.yml --syntax-check
-for playbook in canary-state canary-app canary-route canary-commit canary-recover; do
+for playbook in canary-state canary-app canary-route canary-commit canary-recover release-archive release-operation rollback-prepare deployment-plan; do
   ansible-playbook -i inventory/hosts.ini "playbooks/$playbook.yml" --syntax-check
 done
 ```
@@ -186,6 +166,12 @@ Nginx 설정 적용·복구 스크립트 테스트는 `flock`/GNU install이 있
 ```bash
 bash practice/taehyeon/tests/test-nginx-config.sh
 sh practice/taehyeon/scripts/gradle-in-docker.sh test bootJar
+```
+
+Jenkinsfile의 DEPLOY/ROLLBACK 분기와 실패 처리는 Groovy 4 환경에서 검사한다. 이 테스트는 실제 Jenkins CPS·병렬 취소·플러그인 검증을 대체하지 않는다.
+
+```bash
+groovy practice/taehyeon/tests/test_pipeline.groovy
 ```
 
 ## 빌드와 이미지 테스트

@@ -1,0 +1,17 @@
+---
+- name: Persist the operation result
+  ansible.builtin.copy:
+    content: "{{ {'operation_id':pending_operation.operation_id,'action':pending_operation.action,'status':operation_resolution,'before_release':pending_operation.before_state.release_id,'target_release':pending_operation.target_state.release_id,'error':none,'recovery':operation_resolution} | to_nice_json }}"
+    dest: "{{ release_root }}/operations/{{ pending_operation.operation_id }}.json"
+    mode: '0600'
+- name: Export the verified operation result
+  ansible.builtin.copy:
+    content: "{{ {'pending':false,'resolution':operation_resolution,'operation_id':pending_operation.operation_id,'status':'verified','error':none} | to_nice_json }}"
+    dest: "{{ canary_report_dir }}/operation-status.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+- name: Clear the marker only after all required verification
+  ansible.builtin.file:
+    path: "{{ release_root }}/pending-operation.json"
+    state: absent

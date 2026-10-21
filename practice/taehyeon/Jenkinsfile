@@ -3,6 +3,12 @@
 // stateFile이 빈 문자열이면 이전 상태 파일을 전달하지 않는다(최초 상태 조회용).
 def runCanaryPlaybook(String playbook, Map variables = [:], String stateFile = 'previous-state.json') {
     writeFile file: "${env.REPORT_DIR}/step-vars.json", text: groovy.json.JsonOutput.toJson(variables)
+    if (stateFile) {
+        def baseline = readReportJson(stateFile)
+        // 확장 상태의 release_id가 이번 배포의 release_id를 덮어쓰지 않도록 제한한다.
+        writeFile file: "${env.REPORT_DIR}/baseline-vars.json",
+                  text: groovy.json.JsonOutput.toJson([active_slot:baseline.active_slot, metadata:baseline.metadata])
+    }
     sshagent(credentials: ['taehyeon-appserver-ssh']) {
         withEnv(["CANARY_PLAYBOOK=${playbook}", "CANARY_STATE_FILE=${stateFile}"]) {
             dir(env.ANSIBLE_DIR) {
@@ -11,7 +17,7 @@ def runCanaryPlaybook(String playbook, Map variables = [:], String stateFile = '
                     set -- -e "@$WORKSPACE/$REPORT_DIR/deployment-vars.json" \
                            -e "@$WORKSPACE/$REPORT_DIR/step-vars.json"
                     if [ -n "${CANARY_STATE_FILE:-}" ]; then
-                        set -- "$@" -e "@$WORKSPACE/$REPORT_DIR/$CANARY_STATE_FILE"
+                        set -- "$@" -e "@$WORKSPACE/$REPORT_DIR/baseline-vars.json"
                     fi
                     ansible-playbook -i inventory/hosts.ini "playbooks/$CANARY_PLAYBOOK.yml" "$@"
                 '''
@@ -37,6 +43,25 @@ def observeCanaryStage(String targets, int percent, String report) {
     }
 }
 
+// 보고서 JSON은 일반 Map으로 읽어 Jenkins 재시작 시에도 직렬화할 수 있게 한다.
+def readReportJson(String name) {
+    return new groovy.json.JsonSlurperClassic().parseText(readFile("${env.REPORT_DIR}/${name}"))
+}
+
+// 영구 상태가 복구 기준이다. 이전 workspace의 절대 경로에 의존하지 않는다.
+def runReleaseOperation(String phase, Map variables = [:]) {
+    // -e는 set_fact보다 우선한다. 내부 명세·임시 경로를 넘기지 않는다.
+    def payload = [:]
+    for (name in ['before_state', 'target_state', 'require_operation_owner']) {
+        if (variables.containsKey(name)) payload[name] = variables[name]
+    }
+    runCanaryPlaybook('release-operation', [
+        operation_phase: phase, operation_id: env.OPERATION_ID, operation_action: params.ACTION,
+        observe_seconds: params.OBSERVE_SECONDS as int, min_samples: params.MIN_SAMPLES as int,
+        max_response_ms: params.MAX_RESPONSE_MS as int
+    ] + payload, '')
+}
+
 pipeline {
     agent {
         label 'ansible-agent' // Jenkins Agent에서 빌드와 배포 실행
@@ -51,6 +76,7 @@ pipeline {
     }
 
     parameters {
+        choice(name: 'ACTION', choices: ['DEPLOY', 'ROLLBACK'], description: '새 버전 배포 또는 직전 운영 버전 복구')
         string(name: 'OBSERVE_SECONDS', defaultValue: '60', description: '각 단계 관찰 시간(초)')
         string(name: 'MIN_SAMPLES', defaultValue: '100', description: '각 단계 최소 /version 응답 수')
         string(name: 'MAX_RESPONSE_MS', defaultValue: '2000', description: '허용 최대 응답 시간(ms)')
@@ -69,42 +95,88 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                checkout scm // Git 저장소에서 소스 코드 가져오기
                 script {
-                    env.GIT_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-                    env.RELEASE_ID = "build-${env.BUILD_NUMBER}-${env.GIT_SHA.take(12)}"
-                    env.IMAGE_TAG = env.RELEASE_ID
-                } // 빌드한 커밋과 이번 배포를 식별할 릴리스 생성
-                script {
-                    // 이전 복구 파일을 덮어쓰지 않는다. 미완료 복구는 post에서 먼저 처리한다.
-                    if (fileExists("${env.REPORT_DIR}/recovery-needed.json")) {
-                        error('이전 실행의 복구가 필요합니다. post 단계에서 Ansible 복구를 실행합니다.')
+                    env.RECOVERY_ONLY = 'false'
+                    env.OPERATION_STARTED = 'false'
+                    if (!(params.ACTION in ['DEPLOY', 'ROLLBACK'])) {
+                        error('ACTION은 DEPLOY 또는 ROLLBACK이어야 합니다.')
                     }
                     for (name in ['OBSERVE_SECONDS', 'MIN_SAMPLES', 'MAX_RESPONSE_MS']) {
                         if (!(params[name] ==~ /[1-9][0-9]*/)) {
                             error("${name}은 양의 정수여야 합니다.")
                         }
                     }
-                    sh 'rm -rf "$REPORT_DIR" && mkdir -p "$REPORT_DIR"'
-                    writeFile file: "${env.REPORT_DIR}/deployment-vars.json",
-                        text: groovy.json.JsonOutput.toJson([
-                            app_name: env.APP_NAME, app_version: env.APP_VERSION, git_sha: env.GIT_SHA,
-                            release_id: env.RELEASE_ID, image_tag: env.IMAGE_TAG,
-                            image_tar: "${pwd()}/${env.APP_NAME}-${env.IMAGE_TAG}.tar",
-                            canary_report_dir: "${pwd()}/${env.REPORT_DIR}"
-                        ])
+                    env.OPERATION_ID = "build-${env.BUILD_NUMBER}-${params.ACTION}"
+                    // 이관 전의 로컬 복구 파일은 지우지 않고 기존 복구부터 마친다.
+                    if (fileExists("${env.REPORT_DIR}/recovery-needed.json")) {
+                        env.RECOVERY_ONLY = 'true'
+                        runCanaryPlaybook('canary-recover', [:], 'recovery-needed.json')
+                        writeFile file: "${env.REPORT_DIR}/result.json",
+                                  text: '{"status":"legacy recovery completed; run again for a new operation"}'
+                    } else {
+                        // SCM 정리보다 먼저 기존 workspace의 복구 자료를 확인한다.
+                        checkout scm
+                        sh 'rm -rf "$REPORT_DIR" && mkdir -p "$REPORT_DIR"'
+                        def variables = [app_name: env.APP_NAME,
+                            canary_report_dir: "${pwd()}/${env.REPORT_DIR}",
+                            operation_id: env.OPERATION_ID, jenkins_job: env.JOB_NAME,
+                            jenkins_build: env.BUILD_NUMBER]
+                        if (params.ACTION == 'DEPLOY') {
+                            env.GIT_SHA = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+                            env.RELEASE_ID = "build-${env.BUILD_NUMBER}-${env.GIT_SHA.take(12)}"
+                            env.IMAGE_TAG = env.RELEASE_ID
+                            variables += [app_version: env.APP_VERSION, git_sha: env.GIT_SHA,
+                                release_id: env.RELEASE_ID, image_tag: env.IMAGE_TAG,
+                                image_tar: "${pwd()}/${env.APP_NAME}-${env.IMAGE_TAG}.tar"]
+                        }
+                        writeFile file: "${env.REPORT_DIR}/deployment-vars.json",
+                                  text: groovy.json.JsonOutput.toJson(variables)
+                    }
                 }
             }
         }
 
         stage('Deployment Logic Tests') {
+            when { expression { env.RECOVERY_ONLY != 'true' } }
             steps {
                 // HTTP 관찰기와 Ansible 가중치·슬롯 보호 조건을 VM 접속 없이 검사한다.
                 sh "python3 -m unittest discover -s practice/taehyeon/tests -p 'test_*.py'"
             }
         }
 
+        stage('Ansible Syntax Check') {
+            when { expression { env.RECOVERY_ONLY != 'true' } }
+            steps {
+                dir("${ANSIBLE_DIR}") {
+                    sh '''
+                        ansible-playbook \\
+                          -i inventory/hosts.ini \\
+                          playbooks/deploy.yml --syntax-check
+                        for playbook in canary-state canary-app canary-route canary-commit canary-recover release-archive release-operation rollback-prepare deployment-plan; do
+                            ansible-playbook -i inventory/hosts.ini "playbooks/$playbook.yml" --syntax-check
+                        done
+                    ''' // 서버에 접속하지 않고 Inventory와 Playbook 문법 확인
+                }
+            }
+        }
+
+        stage('Recover Unfinished Operation') {
+            when { expression { env.RECOVERY_ONLY != 'true' } }
+            steps {
+                script {
+                    runReleaseOperation('read')
+                    if (readReportJson('operation-status.json').pending) {
+                        env.RECOVERY_ONLY = 'true'
+                        runReleaseOperation('recover')
+                        writeFile file: "${env.REPORT_DIR}/result.json",
+                                  text: '{"status":"pending operation recovered; run again for a new operation"}'
+                    }
+                }
+            }
+        }
+
         stage('Test') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             steps {
                 sh 'sh practice/taehyeon/scripts/gradle-in-docker.sh test'
                 // Agent의 Java 21과 독립적으로 JDK 25 컨테이너에서 테스트
@@ -112,6 +184,7 @@ pipeline {
         }
 
         stage('Build') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             steps {
                 sh 'sh practice/taehyeon/scripts/gradle-in-docker.sh bootJar'
                 // 동일한 JDK 25 환경에서 배포용 JAR 생성
@@ -119,6 +192,7 @@ pipeline {
         }
 
         stage('Docker Build') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             steps {
                 dir("${APP_DIR}") {
                     sh '''
@@ -133,7 +207,22 @@ pipeline {
             }
         }
 
+        stage('Record Image Identity') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
+            steps {
+                script {
+                    env.EXPECTED_IMAGE_ID = sh(script: 'docker image inspect --format "{{.Id}}" "$APP_NAME:$IMAGE_TAG"', returnStdout: true).trim()
+                    if (!(env.EXPECTED_IMAGE_ID ==~ /sha256:[0-9a-f]{64}/)) {
+                        error('Docker 이미지 ID를 확인할 수 없습니다.')
+                    }
+                    writeFile file: "${env.REPORT_DIR}/deployment-vars.json",
+                              text: groovy.json.JsonOutput.toJson(readReportJson('deployment-vars.json') + [expected_image_id: env.EXPECTED_IMAGE_ID])
+                }
+            }
+        }
+
         stage('Docker Image Test') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             steps {
                 sh 'sh practice/taehyeon/scripts/test-image.sh "$APP_NAME:$IMAGE_TAG" "$APP_VERSION" "$GIT_SHA" "$RELEASE_ID"'
                 // 배포할 이미지를 실행해 상태·버전·Git SHA·릴리스를 검사하고 임시 컨테이너 정리
@@ -141,6 +230,7 @@ pipeline {
         }
 
         stage('Docker Save') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             steps {
                 sh '''
                     docker save \\
@@ -150,22 +240,8 @@ pipeline {
             }
         }
 
-        stage('Ansible Syntax Check') {
-            steps {
-                dir("${ANSIBLE_DIR}") {
-                    sh '''
-                        ansible-playbook \\
-                          -i inventory/hosts.ini \\
-                          playbooks/deploy.yml --syntax-check
-                        for playbook in canary-state canary-app canary-route canary-commit canary-recover; do
-                            ansible-playbook -i inventory/hosts.ini "playbooks/$playbook.yml" --syntax-check
-                        done
-                    ''' // 서버에 접속하지 않고 Inventory와 Playbook 문법 확인
-                }
-            }
-        }
-
         stage('Check Existing Service') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             steps {
                 script {
                     runCanaryPlaybook('canary-state',
@@ -175,7 +251,24 @@ pipeline {
             }
         }
 
+        stage('Archive Releases and Begin Deployment') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
+            steps {
+                script {
+                    runCanaryPlaybook('release-archive', [archive_source: 'active'])
+                    runCanaryPlaybook('release-archive', [archive_source: 'candidate'])
+                    def archived = readReportJson('archived-release.json')
+                    writeFile file: "${env.REPORT_DIR}/deployment-vars.json",
+                              text: groovy.json.JsonOutput.toJson(readReportJson('deployment-vars.json') + [image_archive_sha256: archived.image.archive_sha256])
+                    runCanaryPlaybook('deployment-plan', [:], '')
+                    env.OPERATION_STARTED = 'true'
+                    runReleaseOperation('begin', readReportJson('deployment-plan.json'))
+                }
+            }
+        }
+
         stage('Canary Deployment & Continuous Observation') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             failFast true
             parallel {
                 stage('Continuous HTTP Observation') {
@@ -212,9 +305,6 @@ pipeline {
                         stage('Canary 10%') {
                             steps {
                                 script {
-                                    // 전환 직전 기준을 보존한다. 실패·취소 시 post가 이 파일로 복구한다.
-                                    writeFile file: "${env.REPORT_DIR}/recovery-needed.json",
-                                              text: readFile("${env.REPORT_DIR}/previous-state.json")
                                     runCanaryPlaybook('canary-route', [traffic_percent: 10,
                                         backend_snapshot_path: "${pwd()}/${env.REPORT_DIR}/stage-backends.json"])
                                     observeCanaryStage('stage-backends.json', 10, 'canary-10')
@@ -256,12 +346,42 @@ pipeline {
         }
 
         stage('Record Successful Promotion') {
+            when { expression { params.ACTION == 'DEPLOY' && env.RECOVERY_ONLY != 'true' } }
             steps {
                 script {
                     // 배포 분기와 지속 관찰 분기가 모두 성공한 경우에만 승격을 기록한다.
-                    runCanaryPlaybook('canary-commit')
+                    runReleaseOperation('finalize', readReportJson('deployment-plan.json'))
                     writeFile file: "${env.REPORT_DIR}/result.json", text: '{"status":"promoted"}'
-                    sh 'rm -f "$REPORT_DIR/recovery-needed.json"'
+                }
+            }
+        }
+
+        stage('Plan Previous Release') {
+            when { expression { params.ACTION == 'ROLLBACK' && env.RECOVERY_ONLY != 'true' } }
+            steps {
+                script {
+                    runCanaryPlaybook('rollback-prepare', [operation_phase: 'plan'], '')
+                    env.OPERATION_STARTED = 'true'
+                    runReleaseOperation('begin', readReportJson('rollback-plan.json'))
+                }
+            }
+        }
+        stage('Restore and Route Previous Release') {
+            when { expression { params.ACTION == 'ROLLBACK' && env.RECOVERY_ONLY != 'true' } }
+            steps {
+                script {
+                    runCanaryPlaybook('rollback-prepare', [operation_phase: 'prepare'], '')
+                    runCanaryPlaybook('canary-route', readReportJson('rollback-vars.json'), '')
+                    observeCanaryStage('rollback-backends.json', 0, 'rollback')
+                }
+            }
+        }
+        stage('Record Successful Rollback') {
+            when { expression { params.ACTION == 'ROLLBACK' && env.RECOVERY_ONLY != 'true' } }
+            steps {
+                script {
+                    runReleaseOperation('finalize', readReportJson('rollback-plan.json'))
+                    writeFile file: "${env.REPORT_DIR}/result.json", text: '{"status":"rolled_back"}'
                 }
             }
         }
@@ -270,28 +390,34 @@ pipeline {
     post {
         unsuccessful {
             script {
-                if (fileExists("${env.REPORT_DIR}/recovery-needed.json")) {
-                    // 새 SSH 인증으로 Ansible 복구를 실행한다. 복구 실패 시 마커를 유지한다.
+                if (env.OPERATION_STARTED == 'true' && env.RECOVERY_ONLY != 'true') {
                     try {
                         timeout(time: 10, unit: 'MINUTES') {
-                            runCanaryPlaybook('canary-recover', [:], 'recovery-needed.json')
+                            runReleaseOperation('read')
+                            def pending = readReportJson('operation-status.json')
+                            if (pending.pending && pending.operation_id == env.OPERATION_ID) {
+                                runReleaseOperation('recover', [require_operation_owner: true])
+                            }
                         }
                         writeFile file: "${env.REPORT_DIR}/result.json",
-                                  text: '{"status":"failed","recovery":"restored and verified"}'
+                                  text: '{"status":"failed","recovery":"checked persistent state"}'
                     } catch (Exception recoveryError) {
                         writeFile file: "${env.REPORT_DIR}/result.json",
-                            text: groovy.json.JsonOutput.toJson([
-                                status: 'failed', recovery: 'failed', recovery_error: recoveryError.toString()
-                            ])
+                            text: groovy.json.JsonOutput.toJson([status:'failed', recovery:'failed',
+                                recovery_error:recoveryError.toString()])
                         throw recoveryError
                     }
                 }
             }
         }
         cleanup {
-            // 복구와 전체 HTTP 집계까지 포함해 기록을 보관한다.
-            archiveArtifacts(artifacts: 'practice/taehyeon/.canary/reports/**', allowEmptyArchive: true)
-            sh 'rm -f "$WORKSPACE/$APP_NAME-$IMAGE_TAG.tar" || true'
+            script {
+                try {
+                    archiveArtifacts(artifacts: 'practice/taehyeon/.canary/reports/**', excludes: '**/*.tar', allowEmptyArchive: true)
+                } finally {
+                    sh 'if [ -n "${IMAGE_TAG:-}" ]; then rm -f "$WORKSPACE/$APP_NAME-$IMAGE_TAG.tar"; fi'
+                }
+            }
         }
     }
 }

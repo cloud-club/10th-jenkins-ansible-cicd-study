@@ -1,0 +1,188 @@
+---
+- name: Plan personal release archival
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    release_root: /var/lib/taehyeon-deploy
+  tasks:
+    - ansible.builtin.import_tasks: ../tasks/release-scope.yml
+    - name: Validate archive source
+      ansible.builtin.assert:
+        that: ["archive_source in ['active', 'candidate']"]
+    - name: Select archived metadata
+      ansible.builtin.set_fact:
+        archive_metadata: "{{ metadata if archive_source == 'active' else {'version':app_version, 'gitSha':git_sha, 'release':release_id} }}"
+    - name: Check existing immutable release
+      ansible.builtin.stat:
+        path: "{{ release_root }}/releases/{{ archive_metadata.release | validate_release_id }}"
+        follow: false
+      register: existing_archive
+    - name: Decide whether the active image needs exporting
+      ansible.builtin.set_fact:
+        archive_needed: "{{ not existing_archive.stat.exists }}"
+
+- name: Capture the verified active release on all three servers
+  hosts: app_servers
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Capture current container and image
+      ansible.builtin.include_tasks: ../tasks/release-capture.yml
+      when: archive_source == 'active'
+    - name: Export the actual image once for bootstrap
+      when: archive_source == 'active' and inventory_hostname == 'app1' and hostvars['nginx'].archive_needed
+      block:
+        - name: Create a private temporary export file
+          ansible.builtin.tempfile:
+            state: file
+            prefix: taehyeon-bootstrap-
+          register: bootstrap_export
+        - name: Save the actual active image ID
+          ansible.builtin.command:
+            argv: [docker, image, save, -o, "{{ bootstrap_export.path }}", "{{ captured_image_id }}"]
+          changed_when: true
+        - name: Fetch bootstrap image through the Agent
+          ansible.builtin.fetch:
+            src: "{{ bootstrap_export.path }}"
+            dest: "{{ canary_report_dir }}/bootstrap-image.tar"
+            flat: true
+      always:
+        - name: Remove only this temporary export
+          ansible.builtin.file:
+            path: "{{ bootstrap_export.path }}"
+            state: absent
+          when: bootstrap_export.path is defined
+
+- name: Persist complete release material on Nginx
+  hosts: load_balancer
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  vars:
+    release_root: /var/lib/taehyeon-deploy
+    nginx_listen_port: 18001
+  tasks:
+    - name: Initialize release runtime and personal routing targets
+      ansible.builtin.set_fact:
+        archive_runtime: {}
+        nginx_targets: []
+        archive_slot: "{{ active_slot if archive_source == 'active' else ('b' if active_slot == 'a' else 'a') }}"
+    - name: Check agreement across the three active servers
+      ansible.builtin.include_tasks: ../tasks/release-agreement.yml
+      vars:
+        captured_hosts: "{{ dict(groups['app_servers'] | zip(groups['app_servers'] | map('extract', hostvars))) }}"
+      when: archive_source == 'active'
+    - name: Collect supported active runtime
+      ansible.builtin.set_fact:
+        archive_runtime: "{{ archive_runtime | combine({item:hostvars[item].captured_runtime}) }}"
+      loop: "{{ groups['app_servers'] }}"
+      when: archive_source == 'active'
+    - name: Inspect candidate image on the Agent
+      ansible.builtin.command:
+        argv: [docker, image, inspect, "{{ expected_image_id }}"]
+      register: candidate_image_inspect
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: archive_source == 'candidate'
+    - name: Read candidate image defaults
+      ansible.builtin.set_fact:
+        candidate_image: "{{ candidate_image_inspect.stdout | from_json | first }}"
+      no_log: true
+      when: archive_source == 'candidate'
+    - name: Plan candidate runtime from immutable image defaults
+      ansible.builtin.set_fact:
+        archive_runtime: "{{ archive_runtime | combine({item:{'entrypoint':candidate_image.Config.Entrypoint | default([], true), 'command':candidate_image.Config.Cmd | default([], true), 'restart_policy':'unless-stopped', 'environment':{'APP_VERSION':app_version,'GIT_SHA':git_sha,'RELEASE_ID':release_id,'APP_INSTANCE':item}}}) }}"
+      loop: "{{ groups['app_servers'] }}"
+      when: archive_source == 'candidate'
+    - name: Build personal single-release targets
+      ansible.builtin.set_fact:
+        nginx_targets: "{{ nginx_targets + [{'host':item,'port':{'a':20001,'b':21001}[archive_slot],'weight':1,'metadata':archive_metadata}] }}"
+      loop: "{{ groups['app_servers'] }}"
+    - name: Render the reproducible personal configuration
+      ansible.builtin.set_fact:
+        archive_nginx_config: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/../roles/nginx/templates/taehyeon.conf.j2') }}"
+    - name: Verify active routing matches the supported single-release configuration
+      when: archive_source == 'active'
+      block:
+        - ansible.builtin.slurp:
+            src: /etc/nginx/conf.d/taehyeon.conf
+          register: active_nginx_blob
+        - ansible.builtin.assert:
+            that:
+              - active_nginx_blob.content | b64decode == archive_nginx_config
+    - name: Reuse an existing verified active archive
+      when: archive_source == 'active' and not archive_needed
+      block:
+        - ansible.builtin.include_tasks: ../tasks/release-verify.yml
+          vars:
+            requested_release: "{{ archive_metadata.release }}"
+        - ansible.builtin.assert:
+            that:
+              - release_manifest.metadata == archive_metadata
+              - release_manifest.image.id == hostvars['app1'].captured_image_id
+              - release_manifest.runtime == archive_runtime
+    - name: Create a complete new archive or verify an existing candidate archive
+      when: archive_source == 'candidate' or archive_needed
+      block:
+        - name: Identify source image and local file
+          ansible.builtin.set_fact:
+            archive_image_tar: "{{ canary_report_dir ~ '/bootstrap-image.tar' if archive_source == 'active' else image_tar }}"
+            archive_image_id: "{{ hostvars['app1'].captured_image_id if archive_source == 'active' else expected_image_id }}"
+        - ansible.builtin.stat:
+            path: "{{ archive_image_tar }}"
+            checksum_algorithm: sha256
+          delegate_to: localhost
+          become: false
+          register: source_image_stat
+        - name: Build archive manifest
+          ansible.builtin.set_fact:
+            archive_manifest:
+              schema_version: 1
+              release_id: "{{ archive_metadata.release }}"
+              metadata: "{{ archive_metadata }}"
+              image:
+                id: "{{ archive_image_id }}"
+                archive_sha256: "{{ source_image_stat.stat.checksum }}"
+                archive_name: image.tar
+              runtime: "{{ archive_runtime }}"
+              nginx_sha256: "{{ archive_nginx_config | hash('sha256') }}"
+              origin:
+                job: "{{ jenkins_job | default(none) if archive_source == 'candidate' else none }}"
+                build: "{{ jenkins_build | default(none) if archive_source == 'candidate' else none }}"
+                git_sha: "{{ archive_metadata.gitSha }}"
+              created_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+              bootstrap: "{{ archive_source == 'active' }}"
+        - ansible.builtin.include_tasks: ../tasks/release-store.yml
+    - name: Read existing state for schema migration
+      when: archive_source == 'active'
+      block:
+        - ansible.builtin.stat:
+            path: "{{ release_root }}/state.json"
+          register: migration_state_stat
+        - ansible.builtin.slurp:
+            src: "{{ release_root }}/state.json"
+          register: migration_state_blob
+          when: migration_state_stat.stat.exists
+        - ansible.builtin.set_fact:
+            migration_state: "{{ (migration_state_blob.content | b64decode | from_json) if migration_state_stat.stat.exists else {'active_slot':active_slot,'metadata':metadata} }}"
+        - name: Extend only a valid legacy baseline
+          ansible.builtin.set_fact:
+            migration_state: "{{ (migration_state | validate_release_state(true)) | combine({'schema_version':1,'release_id':metadata.release,'previous_release':none,'operation_id':none,'operation_type':'BOOTSTRAP'}) }}"
+          when: migration_state.schema_version is not defined
+        - name: Persist the verified operating baseline
+          ansible.builtin.copy:
+            content: "{{ migration_state | validate_release_state | to_nice_json }}"
+            dest: "{{ release_root }}/state.json"
+            mode: '0600'
+        - name: Preserve the extended baseline for later Jenkins steps
+          ansible.builtin.copy:
+            content: "{{ migration_state | to_nice_json }}"
+            dest: "{{ canary_report_dir }}/previous-state.json"
+            mode: '0600'
+          delegate_to: localhost
+          become: false

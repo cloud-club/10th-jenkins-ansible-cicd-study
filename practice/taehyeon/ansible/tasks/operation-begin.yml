@@ -1,0 +1,46 @@
+---
+- ansible.builtin.include_tasks: operation-read.yml
+- name: Refuse to overwrite an unfinished operation
+  ansible.builtin.assert:
+    that:
+      - not operation_status.pending
+      - operation_id | validate_release_id == operation_id
+      - operation_action in ['DEPLOY', 'ROLLBACK']
+      - before_state | validate_release_state == current_state
+      - target_state | validate_release_state == target_state
+      - target_state.active_slot != before_state.active_slot
+      - target_state.release_id != before_state.release_id
+      - target_state.operation_id == operation_id
+      - target_state.operation_type == operation_action
+      - target_state.previous_release == (before_state.release_id if operation_action == 'DEPLOY' else none)
+      - operation_action != 'ROLLBACK' or target_state.release_id == before_state.previous_release
+- name: Verify both recovery references before beginning mutations
+  ansible.builtin.include_tasks: release-verify.yml
+  loop: ["{{ before_state.release_id }}", "{{ target_state.release_id }}"]
+  loop_control:
+    loop_var: requested_release
+- ansible.builtin.include_tasks: release-routing-check.yml
+- ansible.builtin.file:
+    path: "{{ release_root }}/operations"
+    state: directory
+    mode: '0700'
+- name: Persist the exact personal configuration before mutation
+  ansible.builtin.copy:
+    content: "{{ routing_blob.content | b64decode }}"
+    dest: "{{ release_root }}/operations/{{ operation_id }}-before.conf"
+    mode: '0600'
+- ansible.builtin.set_fact:
+    pending_operation:
+      schema_version: 1
+      operation_id: "{{ operation_id }}"
+      action: "{{ operation_action }}"
+      before_state: "{{ before_state }}"
+      target_state: "{{ target_state }}"
+      before_nginx_file: "{{ operation_id }}-before.conf"
+      before_nginx_sha256: "{{ routing_blob.content | b64decode | hash('sha256') }}"
+- ansible.builtin.include_tasks: operation-pending.yml
+- name: Record a durable recovery marker before changing containers or traffic
+  ansible.builtin.copy:
+    content: "{{ pending_operation | to_nice_json }}"
+    dest: "{{ release_root }}/pending-operation.json"
+    mode: '0600'

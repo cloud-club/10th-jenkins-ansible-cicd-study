@@ -1,0 +1,16 @@
+---
+- name: Require all three captured app hosts
+  ansible.builtin.assert:
+    that:
+      - captured_hosts.keys() | sort == ['app1', 'app2', 'app3']
+- name: Require the same image and build on all three servers
+  ansible.builtin.assert:
+    that:
+      - captured_hosts[item].captured_image_id == captured_hosts['app1'].captured_image_id
+      - captured_hosts[item].captured_runtime.environment.APP_VERSION == archive_metadata.version
+      - captured_hosts[item].captured_runtime.environment.GIT_SHA == archive_metadata.gitSha
+      - captured_hosts[item].captured_runtime.environment.RELEASE_ID == archive_metadata.release
+      - captured_hosts[item].captured_runtime.environment.APP_INSTANCE == item
+      - captured_hosts[item].captured_runtime.entrypoint == captured_hosts['app1'].captured_runtime.entrypoint
+      - captured_hosts[item].captured_runtime.command == captured_hosts['app1'].captured_runtime.command
+  loop: [app1, app2, app3]

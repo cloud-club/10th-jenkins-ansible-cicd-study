@@ -1,0 +1,11 @@
+---
+- name: Protect personal release storage and inventory
+  ansible.builtin.assert:
+    that:
+      - release_root == '/var/lib/taehyeon-deploy'
+      - groups['app_servers'] | sort == ['app1', 'app2', 'app3']
+      - groups['load_balancer'] == ['nginx']
+      - hostvars['nginx'].ansible_host == '1.201.116.156'
+      - canary_report_dir is match('^/')
+      - canary_report_dir | length > 1
+  tags: [validate]

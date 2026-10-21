@@ -1,0 +1,8 @@
+---
+- name: Save complete verified baseline into the Jenkins workspace
+  ansible.builtin.copy:
+    content: "{{ stored_state | combine({'active_slot': stable_slot, 'metadata': stable_metadata}) | to_nice_json }}"
+    dest: "{{ snapshot_path }}"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
