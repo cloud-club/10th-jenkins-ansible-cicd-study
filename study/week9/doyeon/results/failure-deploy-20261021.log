@@ -1,0 +1,181 @@
+
+PLAY [Prepare low traffic for the canary before replacing it] ******************
+
+TASK [Require safe, distinct weights and a known canary] ***********************
+ok: [doyeon_lb] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Require every backend to be active at normal weight] *********************
+ok: [doyeon_lb] => (item=doyeon_app1)
+ok: [doyeon_lb] => (item=doyeon_app2)
+ok: [doyeon_lb] => (item=doyeon_app3)
+
+TASK [Set the canary and stable backend weights] *******************************
+changed: [doyeon_lb] => (item=doyeon_app1)
+changed: [doyeon_lb] => (item=doyeon_app2)
+changed: [doyeon_lb] => (item=doyeon_app3)
+
+TASK [Validate the weighted upstream] ******************************************
+ok: [doyeon_lb]
+
+TASK [Reload Nginx with low canary traffic] ************************************
+changed: [doyeon_lb]
+
+PLAY [Refuse to start when any current backend is unhealthy] *******************
+
+TASK [Check the direct health endpoint] ****************************************
+ok: [doyeon_app1]
+ok: [doyeon_app2]
+ok: [doyeon_app3]
+
+PLAY [Refuse to start unless all three backends are active in Nginx] ***********
+
+TASK [Validate the rollout phase and canary selection] *************************
+ok: [doyeon_lb] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Validate the current Nginx configuration] ********************************
+ok: [doyeon_lb]
+
+TASK [Require exactly one expected enabled line for each App server] ***********
+ok: [doyeon_lb] => (item=doyeon_app1)
+ok: [doyeon_lb] => (item=doyeon_app2)
+ok: [doyeon_lb] => (item=doyeon_app3)
+
+PLAY [Pull the release image on every backend before any traffic change] *******
+
+TASK [Require an explicit image] ***********************************************
+ok: [doyeon_app1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ok: [doyeon_app2] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+ok: [doyeon_app3] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Pull the release image while all backends still serve traffic] ***********
+included: app for doyeon_app1, doyeon_app2, doyeon_app3
+
+TASK [app : Check whether the release image is already present] ****************
+ok: [doyeon_app3]
+ok: [doyeon_app2]
+ok: [doyeon_app1]
+
+TASK [app : Pull the exact release image when it is missing] *******************
+skipping: [doyeon_app1]
+skipping: [doyeon_app2]
+skipping: [doyeon_app3]
+
+PLAY [Drain, deploy, check, and rejoin one batch at a time] ********************
+
+TASK [Require an explicit image and release] ***********************************
+ok: [doyeon_app1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Remember that no container in this batch has been touched yet] ***********
+ok: [doyeon_app1]
+
+TASK [Drain each backend in this batch without concurrent Nginx edits] *********
+changed: [doyeon_app1 -> doyeon_lb(1.201.116.156)] => (item=doyeon_app1)
+
+TASK [Stop if an expected enabled upstream line is missing] ********************
+ok: [doyeon_app1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Validate Nginx after draining] *******************************************
+ok: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Reload Nginx with this batch drained] ************************************
+changed: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Allow old Nginx workers to finish active requests] ***********************
+Pausing for 3 seconds
+ok: [doyeon_app1]
+
+TASK [Remember that containers in this batch are being replaced] ***************
+ok: [doyeon_app1]
+
+TASK [Replace and verify the application container] ****************************
+included: app for doyeon_app1
+
+TASK [app : Make sure the release image is available locally] ******************
+included: /Users/doyammu/Desktop/cloudclub/10th-jenkins-ansible-cicd-study/practice/doyeon/ansible/roles/app/tasks/pull.yml for doyeon_app1
+
+TASK [app : Check whether the release image is already present] ****************
+ok: [doyeon_app1]
+
+TASK [app : Pull the exact release image when it is missing] *******************
+skipping: [doyeon_app1]
+
+TASK [app : Check whether our container exists] ********************************
+ok: [doyeon_app1]
+
+TASK [app : Remove only Doyeon's old container] ********************************
+changed: [doyeon_app1]
+
+TASK [app : Start the new release] *********************************************
+changed: [doyeon_app1]
+
+TASK [app : Wait for the direct health endpoint] *******************************
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (11 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (10 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (9 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (8 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (7 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (6 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (5 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (4 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (3 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (2 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (1 retries left).
+FAILED - RETRYING: [doyeon_app1]: app : Wait for the direct health endpoint (0 retries left).
+[ERROR]: Task failed: Module failed: Status code was 503 and not [200]: HTTP Error 503: Service Unavailable
+Origin: /Users/doyammu/Desktop/cloudclub/10th-jenkins-ansible-cicd-study/practice/doyeon/ansible/roles/app/tasks/main.yml:33:3
+
+31       - "{{ image_ref }}"
+32
+33 - name: Wait for the direct health endpoint
+     ^ column 3
+
+fatal: [doyeon_app1]: FAILED! => {"attempts": 12, "cache_control": "no-store", "changed": false, "content": "{\"service\": \"doyeon-app\", \"version\": \"v4\", \"release\": \"v4-canary-health-fail-20261021\", \"instance\": \"doyeon_app1\", \"status\": \"fail\"}", "content_length": "132", "content_type": "application/json; charset=utf-8", "date": "Wed, 21 Oct 2026 12:48:09 GMT", "elapsed": 0, "json": {"instance": "doyeon_app1", "release": "v4-canary-health-fail-20261021", "service": "doyeon-app", "status": "fail", "version": "v4"}, "msg": "Status code was 503 and not [200]: HTTP Error 503: Service Unavailable", "redirected": false, "server": "BaseHTTP/0.6 Python/3.12.15", "status": 503, "url": "http://127.0.0.1:20005/health"}
+
+TASK [Put the batch back in the upstream when no container was touched] ********
+skipping: [doyeon_app1] => (item=doyeon_app1) 
+skipping: [doyeon_app1]
+
+TASK [Reload Nginx with the restored upstream when it validates] ***************
+skipping: [doyeon_app1]
+
+TASK [Stop the rollout; the backend was restored to traffic] *******************
+skipping: [doyeon_app1]
+
+TASK [Stop the rollout and leave an unverified backend out of traffic] *********
+[ERROR]: Task failed: Action failed: Rolling deployment stopped at doyeon_app1. Check its direct /health and /etc/nginx/conf.d/doyeon.conf before re-enabling traffic.
+Origin: /Users/doyammu/Desktop/cloudclub/10th-jenkins-ansible-cicd-study/practice/doyeon/ansible/playbooks/rolling.yml:189:11
+
+187           when: not (batch_container_touched | default(true))
+188
+189         - name: Stop the rollout and leave an unverified backend out of traffic
+              ^ column 11
+
+fatal: [doyeon_app1]: FAILED! => {"changed": false, "msg": "Rolling deployment stopped at doyeon_app1. Check its direct /health and /etc/nginx/conf.d/doyeon.conf before re-enabling traffic."}
+
+PLAY RECAP *********************************************************************
+doyeon_app1                : ok=18   changed=4    unreachable=0    failed=1    skipped=5    rescued=1    ignored=0   
+doyeon_app2                : ok=4    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
+doyeon_app3                : ok=4    changed=0    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
+doyeon_lb                  : ok=8    changed=2    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+

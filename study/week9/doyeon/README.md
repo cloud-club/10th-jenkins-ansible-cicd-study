@@ -19,4 +19,4 @@
 - 장애 재현에는 `FAILURE_SCENARIO=health` 또는 `startup`을 선택한다. 앱1 검증에서 중단되고 직전 릴리스로 복구돼야 한다.
 - 연속 요청 기록은 `python3 practice/doyeon/scripts/probe.py --duration 180 --output canary-rolling-results.csv`로 남길 수 있다. Jenkins 콘솔의 카나리 응답 수, 실패 지점, 롤백 후 직접·Nginx 검증 결과도 함께 확인한다.
 
-현재 확인한 범위는 앱 단위 테스트, Ansible 전체 플레이북의 문법 검사, `--list-hosts`의 카나리 1대·잔여 2대 대상 확인이다. 실제 Jenkins 빌드와 VM 배포, 트래픽 비율 및 장애 복구는 이 변경 이후 아직 실행하지 않았다.
+2026-10-21 실제 VM에서 정상 카나리→롤링 배포와 Health Check 장애 주입 후 롤백을 실행했다. 측정값, 트래픽 CSV, Ansible 로그 및 타임아웃·재시도 설정의 근거는 [실배포 검증 기록](live-test-20261021.md)에 있다. 이 실행은 로컬 Ansible에서 수행했으며, Jenkins Job의 `post.failure` 자동 호출은 아직 실환경 검증하지 않았다.

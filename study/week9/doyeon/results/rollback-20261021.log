@@ -1,0 +1,201 @@
+
+PLAY [Restore each backend to its preserved healthy image] *********************
+
+TASK [Require the saved image on this host] ************************************
+ok: [doyeon_app1]
+
+TASK [Drain this backend if it is active] **************************************
+ok: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Require exactly one drained upstream line] *******************************
+ok: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Validate the drained Nginx configuration] ********************************
+ok: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Reload Nginx with this backend drained] **********************************
+changed: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Restore and verify the previous release] *********************************
+included: app for doyeon_app1
+
+TASK [app : Make sure the release image is available locally] ******************
+included: /Users/doyammu/Desktop/cloudclub/10th-jenkins-ansible-cicd-study/practice/doyeon/ansible/roles/app/tasks/pull.yml for doyeon_app1
+
+TASK [app : Check whether the release image is already present] ****************
+ok: [doyeon_app1]
+
+TASK [app : Pull the exact release image when it is missing] *******************
+skipping: [doyeon_app1]
+
+TASK [app : Check whether our container exists] ********************************
+ok: [doyeon_app1]
+
+TASK [app : Remove only Doyeon's old container] ********************************
+changed: [doyeon_app1]
+
+TASK [app : Start the new release] *********************************************
+changed: [doyeon_app1]
+
+TASK [app : Wait for the direct health endpoint] *******************************
+ok: [doyeon_app1]
+
+TASK [app : Verify the exact version and responding server] ********************
+ok: [doyeon_app1]
+
+TASK [Rejoin this healthy backend at normal weight] ****************************
+changed: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Require the drained line to have been restored] **************************
+ok: [doyeon_app1] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Validate the restored Nginx configuration] *******************************
+ok: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+TASK [Reload Nginx with the healthy backend rejoined] **************************
+changed: [doyeon_app1 -> doyeon_lb(1.201.116.156)]
+
+PLAY [Restore each backend to its preserved healthy image] *********************
+
+TASK [Require the saved image on this host] ************************************
+ok: [doyeon_app2]
+
+TASK [Drain this backend if it is active] **************************************
+changed: [doyeon_app2 -> doyeon_lb(1.201.116.156)]
+
+TASK [Require exactly one drained upstream line] *******************************
+ok: [doyeon_app2 -> doyeon_lb(1.201.116.156)]
+
+TASK [Validate the drained Nginx configuration] ********************************
+ok: [doyeon_app2 -> doyeon_lb(1.201.116.156)]
+
+TASK [Reload Nginx with this backend drained] **********************************
+changed: [doyeon_app2 -> doyeon_lb(1.201.116.156)]
+
+TASK [Restore and verify the previous release] *********************************
+included: app for doyeon_app2
+
+TASK [app : Make sure the release image is available locally] ******************
+included: /Users/doyammu/Desktop/cloudclub/10th-jenkins-ansible-cicd-study/practice/doyeon/ansible/roles/app/tasks/pull.yml for doyeon_app2
+
+TASK [app : Check whether the release image is already present] ****************
+ok: [doyeon_app2]
+
+TASK [app : Pull the exact release image when it is missing] *******************
+skipping: [doyeon_app2]
+
+TASK [app : Check whether our container exists] ********************************
+ok: [doyeon_app2]
+
+TASK [app : Remove only Doyeon's old container] ********************************
+changed: [doyeon_app2]
+
+TASK [app : Start the new release] *********************************************
+changed: [doyeon_app2]
+
+TASK [app : Wait for the direct health endpoint] *******************************
+ok: [doyeon_app2]
+
+TASK [app : Verify the exact version and responding server] ********************
+ok: [doyeon_app2]
+
+TASK [Rejoin this healthy backend at normal weight] ****************************
+changed: [doyeon_app2 -> doyeon_lb(1.201.116.156)]
+
+TASK [Require the drained line to have been restored] **************************
+ok: [doyeon_app2] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Validate the restored Nginx configuration] *******************************
+ok: [doyeon_app2 -> doyeon_lb(1.201.116.156)]
+
+TASK [Reload Nginx with the healthy backend rejoined] **************************
+changed: [doyeon_app2 -> doyeon_lb(1.201.116.156)]
+
+PLAY [Restore each backend to its preserved healthy image] *********************
+
+TASK [Require the saved image on this host] ************************************
+ok: [doyeon_app3]
+
+TASK [Drain this backend if it is active] **************************************
+changed: [doyeon_app3 -> doyeon_lb(1.201.116.156)]
+
+TASK [Require exactly one drained upstream line] *******************************
+ok: [doyeon_app3 -> doyeon_lb(1.201.116.156)]
+
+TASK [Validate the drained Nginx configuration] ********************************
+ok: [doyeon_app3 -> doyeon_lb(1.201.116.156)]
+
+TASK [Reload Nginx with this backend drained] **********************************
+changed: [doyeon_app3 -> doyeon_lb(1.201.116.156)]
+
+TASK [Restore and verify the previous release] *********************************
+included: app for doyeon_app3
+
+TASK [app : Make sure the release image is available locally] ******************
+included: /Users/doyammu/Desktop/cloudclub/10th-jenkins-ansible-cicd-study/practice/doyeon/ansible/roles/app/tasks/pull.yml for doyeon_app3
+
+TASK [app : Check whether the release image is already present] ****************
+ok: [doyeon_app3]
+
+TASK [app : Pull the exact release image when it is missing] *******************
+skipping: [doyeon_app3]
+
+TASK [app : Check whether our container exists] ********************************
+ok: [doyeon_app3]
+
+TASK [app : Remove only Doyeon's old container] ********************************
+changed: [doyeon_app3]
+
+TASK [app : Start the new release] *********************************************
+changed: [doyeon_app3]
+
+TASK [app : Wait for the direct health endpoint] *******************************
+ok: [doyeon_app3]
+
+TASK [app : Verify the exact version and responding server] ********************
+ok: [doyeon_app3]
+
+TASK [Rejoin this healthy backend at normal weight] ****************************
+changed: [doyeon_app3 -> doyeon_lb(1.201.116.156)]
+
+TASK [Require the drained line to have been restored] **************************
+ok: [doyeon_app3] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Validate the restored Nginx configuration] *******************************
+ok: [doyeon_app3 -> doyeon_lb(1.201.116.156)]
+
+TASK [Reload Nginx with the healthy backend rejoined] **************************
+changed: [doyeon_app3 -> doyeon_lb(1.201.116.156)]
+
+PLAY [Verify every backend and the load balancer after rollback] ***************
+
+TASK [Check restored release directly] *****************************************
+ok: [doyeon_app2]
+ok: [doyeon_app3]
+ok: [doyeon_app1]
+
+PLAY [Verify the load balancer after rollback] *********************************
+
+TASK [Require every backend to be rejoined at equal weight] ********************
+ok: [doyeon_lb] => (item=doyeon_app1)
+ok: [doyeon_lb] => (item=doyeon_app2)
+ok: [doyeon_lb] => (item=doyeon_app3)
+
+TASK [Check restored release through Nginx] ************************************
+ok: [doyeon_lb]
+
+PLAY RECAP *********************************************************************
+doyeon_app1                : ok=18   changed=5    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
+doyeon_app2                : ok=18   changed=6    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
+doyeon_app3                : ok=18   changed=6    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
+doyeon_lb                  : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+
