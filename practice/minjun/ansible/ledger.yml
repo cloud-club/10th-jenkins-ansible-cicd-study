@@ -1,0 +1,76 @@
+---
+# 3주차: 서명된 배포 기록(ledger)을 LB와 Jenkins workspace 사이에서 옮긴다.
+# 서명과 검증은 여기서 하지 않는다. 키는 Agent의 tools/ledger.py만 쓴다 (서버에는 키가 가지 않는다).
+#
+#   -e ledger_mode=pull  LB → workspace (없으면 빈 파일. 첫 배포)
+#   -e ledger_mode=push  workspace → LB (이전 파일은 backup)
+#   -e ledger_mode=ids -e ids_tag=<tag>  각 app 서버가 그 태그로 로드한 이미지 ID → workspace JSON
+#   -e ledger_local=<workspace 경로>
+
+- name: Ledger file on LB
+  hosts: lb
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Ensure ledger dir
+      ansible.builtin.file:
+        path: "{{ ledger_remote | dirname }}"
+        state: directory
+        owner: root
+        mode: "0750"
+      when: ledger_mode in ['pull', 'push']
+
+    - name: Ledger exists?
+      ansible.builtin.stat:
+        path: "{{ ledger_remote }}"
+      register: ledger_st
+      when: ledger_mode == 'pull'
+
+    - name: Pull ledger
+      ansible.builtin.fetch:
+        src: "{{ ledger_remote }}"
+        dest: "{{ ledger_local }}"
+        flat: true
+      when: ledger_mode == 'pull' and ledger_st.stat.exists
+
+    - name: No ledger yet → empty file (first deploy)
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ ledger_local }}"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      when: ledger_mode == 'pull' and not ledger_st.stat.exists
+
+    - name: Push ledger (keep previous as backup)
+      ansible.builtin.copy:
+        src: "{{ ledger_local }}"
+        dest: "{{ ledger_remote }}"
+        owner: root
+        mode: "0640"
+        backup: true
+      when: ledger_mode == 'push'
+
+- name: Image IDs this pipeline loaded for a tag
+  hosts: app
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Read ID record
+      ansible.builtin.slurp:
+        src: "/opt/{{ owner }}/image-ids/{{ ids_tag }}"
+      register: id_rec
+      when: ledger_mode == 'ids'
+
+    - name: Write ids JSON on the agent
+      ansible.builtin.copy:
+        content: >-
+          {{ dict(groups['app'] | zip(groups['app']
+             | map('extract', hostvars, ['id_rec', 'content'])
+             | map('b64decode') | map('trim'))) | to_json }}
+        dest: "{{ ledger_local }}"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: ledger_mode == 'ids'
