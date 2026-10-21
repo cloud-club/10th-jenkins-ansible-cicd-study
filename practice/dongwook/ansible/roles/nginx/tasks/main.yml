@@ -102,6 +102,46 @@
       ansible.builtin.fail:
         msg: "Traffic restored to {{ active_slot }}. Deployment failed at: {{ ansible_failed_task.name }}. Inspect candidate logs before retrying."
 
+# Only a verified switch produces a rollback artifact, even if the surrounding
+# availability monitor subsequently marks the Jenkins build as failed.
+- name: Ensure the local artifact directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/../../.artifacts"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Save the completed deployment for a later rollback
+  vars:
+    deployment_record:
+      status: completed
+      source:
+        job: "{{ lookup('ansible.builtin.env', 'JOB_NAME') | default('manual', true) }}"
+        build: "{{ lookup('ansible.builtin.env', 'BUILD_NUMBER') | default('manual', true) }}"
+      topology:
+        app_servers: "{{ dict(groups['app_servers'] | zip(groups['app_servers'] | map('extract', hostvars, 'ansible_host'))) }}"
+        load_balancer: "{{ ansible_host }}"
+        nginx_port: "{{ nginx_port }}"
+      before:
+        slot: "{{ active_slot }}"
+        response_slot: "{{ previous_release.json.slot }}"
+        app_version: "{{ previous_release.json.version }}"
+        release_id: "{{ previous_release.json.release }}"
+        git_revision: "{{ previous_release.json.revision }}"
+      after:
+        slot: "{{ target_slot }}"
+        app_version: "{{ app_version }}"
+        release_id: "{{ release_id }}"
+        git_revision: "{{ git_revision }}"
+        image_ref: "{{ image_ref }}"
+  ansible.builtin.copy:
+    content: "{{ deployment_record | to_nice_json }}\n"
+    dest: "{{ playbook_dir }}/../../.artifacts/deployment-result.json"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+
 - name: Report the active release and retained rollback slot
   ansible.builtin.debug:
     msg: "Active={{ target_slot }}:{{ slot_ports[target_slot] }}, release={{ release_id }}. Previous {{ active_slot }} containers remain running."
