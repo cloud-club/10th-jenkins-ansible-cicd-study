@@ -194,8 +194,7 @@ TASK [Check restored release through Nginx] ************************************
 ok: [doyeon_lb]
 
 PLAY RECAP *********************************************************************
-doyeon_app1                : ok=18   changed=5    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
-doyeon_app2                : ok=18   changed=6    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
-doyeon_app3                : ok=18   changed=6    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0   
-doyeon_lb                  : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
-
+doyeon_app1                : ok=18   changed=5    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
+doyeon_app2                : ok=18   changed=6    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
+doyeon_app3                : ok=18   changed=6    unreachable=0    failed=0    skipped=1    rescued=0    ignored=0
+doyeon_lb                  : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
