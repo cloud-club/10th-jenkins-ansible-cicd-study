@@ -5,3 +5,11 @@ container_name: doyeon-app
 nginx_config: /etc/nginx/conf.d/doyeon.conf
 lb_host: doyeon_lb
 rollback_image_ref: doyeon-app:rollback
+canary_host: doyeon_app1
+canary_weight: 1
+stable_weight: 9
+canary_request_count: 60
+canary_max_percent: 20
+app_health_timeout: 3
+app_health_attempts: 12
+app_health_delay: 5

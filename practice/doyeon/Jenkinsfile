@@ -36,7 +36,7 @@ pipeline {
   }
   parameters {
     string(name: 'APP_VERSION', defaultValue: 'v1', description: 'v1, v2 또는 장애 재현용 v3')
-    choice(name: 'DEPLOY_MODE', choices: ['bootstrap', 'rolling'], description: '첫 배포 또는 롤링 배포')
+    choice(name: 'DEPLOY_MODE', choices: ['bootstrap', 'rolling', 'canary-rolling'], description: '첫 배포, 롤링 또는 카나리 후 롤링')
     choice(name: 'ROLLING_BATCH_SIZE', choices: ['1', '2'], description: '롤링 배포 시 동시에 교체할 앱 서버 수')
     choice(name: 'FAILURE_SCENARIO', choices: ['none', 'health', 'startup'], description: '장애 재현: Health Check 실패 또는 실행 실패')
   }
@@ -75,7 +75,7 @@ pipeline {
         dir('practice/doyeon/ansible') {
           sh '''
             ansible-inventory --graph
-            for playbook in bootstrap rolling prepare-rollback rollback cleanup-rollback verify; do
+            for playbook in bootstrap rolling canary-rolling start-canary verify-canary normalize-canary prepare-rollback rollback cleanup-rollback verify; do
               ansible-playbook "playbooks/$playbook.yml" --syntax-check
             done
           '''
@@ -128,7 +128,9 @@ pipeline {
               set -e
               ansible-playbook "playbooks/$DEPLOY_MODE.yml" \
                 -e "image_ref=$IMAGE_REF" -e "app_version=$APP_VERSION" \
-                -e "release_id=$RELEASE_ID" -e "rolling_batch_size=$ROLLING_BATCH_SIZE"
+                -e "release_id=$RELEASE_ID" -e "rolling_batch_size=$ROLLING_BATCH_SIZE" \
+                -e "previous_version=${PREVIOUS_VERSION:-}" \
+                -e "previous_release=${PREVIOUS_RELEASE:-}"
             '''
           }
         }

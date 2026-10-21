@@ -1,0 +1,38 @@
+---
+- name: Prepare low traffic for the canary before replacing it
+  hosts: load_balancers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Require safe, distinct weights and a known canary
+      ansible.builtin.assert:
+        that:
+          - canary_host in groups['app_servers']
+          - groups['app_servers'] | length == 3
+          - canary_weight | int >= 1
+          - stable_weight | int > canary_weight | int
+
+    - name: Require every backend to be active at normal weight
+      ansible.builtin.command:
+        argv: [grep, -Fxc, "    server {{ hostvars[item].ansible_host }}:{{ app_port }};", "{{ nginx_config }}"]
+      loop: "{{ groups['app_servers'] }}"
+      register: original_line
+      changed_when: false
+      failed_when: original_line.rc != 0 or original_line.stdout != '1'
+
+    - name: Set the canary and stable backend weights
+      ansible.builtin.lineinfile:
+        path: "{{ nginx_config }}"
+        regexp: "^    server {{ hostvars[item].ansible_host | regex_escape }}:{{ app_port }};$"
+        line: "    server {{ hostvars[item].ansible_host }}:{{ app_port }} weight={{ canary_weight if item == canary_host else stable_weight }};"
+        backrefs: true
+      loop: "{{ groups['app_servers'] }}"
+
+    - name: Validate the weighted upstream
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Reload Nginx with low canary traffic
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

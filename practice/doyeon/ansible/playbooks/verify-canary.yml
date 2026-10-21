@@ -1,0 +1,59 @@
+---
+- name: Observe the mixed release through Nginx before expanding rollout
+  hosts: load_balancers
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Require the previous and new releases to differ
+      ansible.builtin.assert:
+        that:
+          - previous_version is defined
+          - previous_release is defined
+          - app_version is defined
+          - release_id is defined
+          - previous_release != release_id
+          - canary_host in groups['app_servers']
+          - canary_request_count | int >= 20
+          - canary_max_percent | int > 0
+          - canary_max_percent | int < 50
+
+    - name: Sample real load balancer responses
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nginx_port }}/health"
+        status_code: 200
+        timeout: 5
+        return_content: true
+      loop: "{{ range(0, canary_request_count | int) | list }}"
+      loop_control:
+        label: "request {{ item + 1 }}"
+      register: canary_samples
+
+    - name: Require every response to come from the expected release
+      ansible.builtin.assert:
+        that:
+          - item.status == 200
+          - item.json.status == 'ok'
+          - item.json.instance in groups['app_servers']
+          - item.json.version == (app_version if item.json.instance == canary_host else previous_version)
+          - item.json.release == (release_id if item.json.instance == canary_host else previous_release)
+        fail_msg: "Unexpected response from {{ item.json.instance | default('unknown') }} during canary observation"
+      loop: "{{ canary_samples.results }}"
+      loop_control:
+        label: "request {{ item.item + 1 }}"
+
+    - name: Count requests served by the canary
+      ansible.builtin.set_fact:
+        canary_hits: "{{ canary_samples.results | map(attribute='json') | selectattr('instance', 'equalto', canary_host) | list | length }}"
+
+    - name: Require a visible but limited canary response share
+      ansible.builtin.assert:
+        that:
+          - canary_hits | int > 0
+          - (canary_hits | int) * 100 <= (canary_request_count | int) * (canary_max_percent | int)
+          - (canary_samples.results | map(attribute='json') | selectattr('instance', 'equalto', item) | list | length) > 0
+        fail_msg: "Canary received {{ canary_hits }}/{{ canary_request_count }} responses; stop expansion and roll back."
+      loop: "{{ groups['app_servers'] | difference([canary_host]) }}"
+
+    - name: Report observed canary traffic
+      ansible.builtin.debug:
+        msg: "Canary {{ canary_host }} served {{ canary_hits }}/{{ canary_request_count }} successful requests."

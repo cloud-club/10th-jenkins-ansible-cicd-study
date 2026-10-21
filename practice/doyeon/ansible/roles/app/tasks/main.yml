@@ -35,9 +35,10 @@
     url: "http://127.0.0.1:{{ app_port }}/health"
     return_content: true
     status_code: 200
+    timeout: "{{ app_health_timeout }}"
   register: direct_health
-  retries: 12
-  delay: 5
+  retries: "{{ app_health_attempts }}"
+  delay: "{{ app_health_delay }}"
   until: direct_health.status == 200 and direct_health.json.status == 'ok'
 
 - name: Verify the exact version and responding server
@@ -45,6 +46,7 @@
     url: "http://127.0.0.1:{{ app_port }}/version"
     return_content: true
     status_code: 200
+    timeout: "{{ app_health_timeout }}"
   register: direct_version
   failed_when: >-
     direct_version.status != 200 or

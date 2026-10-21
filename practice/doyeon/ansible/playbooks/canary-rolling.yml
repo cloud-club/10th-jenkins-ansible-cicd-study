@@ -1,0 +1,14 @@
+---
+- import_playbook: start-canary.yml
+
+- import_playbook: rolling.yml
+  vars:
+    rollout_phase: canary
+
+- import_playbook: verify-canary.yml
+
+- import_playbook: rolling.yml
+  vars:
+    rollout_phase: remaining
+
+- import_playbook: normalize-canary.yml

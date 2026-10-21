@@ -21,6 +21,14 @@
   become: false
   gather_facts: false
   tasks:
+    - name: Require every backend to be active at equal weight
+      ansible.builtin.command:
+        argv: [grep, -Fxc, "    server {{ hostvars[item].ansible_host }}:{{ app_port }};", "{{ nginx_config }}"]
+      loop: "{{ groups['app_servers'] }}"
+      register: final_upstream_line
+      changed_when: false
+      failed_when: final_upstream_line.rc != 0 or final_upstream_line.stdout != '1'
+
     - name: Check exact release through Nginx
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ nginx_port }}/health"
